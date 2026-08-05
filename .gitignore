@@ -1,0 +1,10 @@
+# Binaries and test artifacts
+*.test
+*.out
+/bin/
+coverage.*
+
+# Editor / OS noise
+.idea/
+.vscode/
+.DS_Store
