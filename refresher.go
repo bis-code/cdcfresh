@@ -2,13 +2,20 @@ package cdcfresh
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Refresher orchestrates the CDC→coalesce→rebuild loop. Create with New,
 // start with Run.
 type Refresher struct {
-	cfg config
+	cfg   config
+	mu    sync.Mutex // guards dirty
+	dirty *dirtySet
+	nudge chan struct{}
+	stats stats
 }
 
 // New validates options and builds a Refresher. It reports every missing
@@ -31,5 +38,12 @@ func New(opts ...Option) (*Refresher, error) {
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("cdcfresh: missing required options: %s", strings.Join(missing, ", "))
 	}
-	return &Refresher{cfg: cfg}, nil
+	return &Refresher{
+		cfg: cfg,
+		dirty: newDirtySet(cfg.coalesce, cfg.maxWait, cfg.poisonAfter,
+			func(n int) time.Duration {
+				return retryDelay(cfg.backoffBase, cfg.backoffCap, n, rand.Float64)
+			}),
+		nudge: make(chan struct{}, 1),
+	}, nil
 }
