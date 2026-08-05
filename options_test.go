@@ -60,6 +60,37 @@ func TestNewDefaults(t *testing.T) {
 	}
 }
 
+func TestNewRejectsInvalidValues(t *testing.T) {
+	cases := []struct {
+		name string
+		opt  Option
+		want string
+	}{
+		{"Workers(0)", Workers(0), "Workers"},
+		{"Coalesce(-1)", Coalesce(-1), "Coalesce"},
+		{"PoisonAfter(0)", PoisonAfter(0), "PoisonAfter"},
+		{"Reconcile(0, fn)", Reconcile(0, func(context.Context) ([]Key, error) { return nil, nil }), "Reconcile"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := New(append(requiredOpts(), tc.opt)...)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want error naming %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestNewValidConfigStillConstructs(t *testing.T) {
+	_, err := New(append(requiredOpts(),
+		Workers(1), Coalesce(time.Millisecond), PoisonAfter(1),
+		Reconcile(time.Second, func(context.Context) ([]Key, error) { return nil, nil }),
+	)...)
+	if err != nil {
+		t.Fatalf("valid config: unexpected error %v", err)
+	}
+}
+
 func TestOptionsApply(t *testing.T) {
 	r, err := New(append(requiredOpts(),
 		Coalesce(time.Second), MaxWait(2*time.Second), Workers(1),

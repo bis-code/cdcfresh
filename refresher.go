@@ -2,25 +2,28 @@ package cdcfresh
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // Refresher orchestrates the CDC→coalesce→rebuild loop. Create with New,
 // start with Run.
 type Refresher struct {
-	cfg   config
-	mu    sync.Mutex // guards dirty
-	dirty *dirtySet
-	nudge chan struct{}
-	stats stats
+	cfg     config
+	mu      sync.Mutex // guards dirty
+	dirty   *dirtySet
+	nudge   chan struct{}
+	stats   stats
+	started atomic.Bool
 }
 
 // New validates options and builds a Refresher. It reports every missing
-// required option in one error.
+// required option, and every option given an invalid value, in one error.
 func New(opts ...Option) (*Refresher, error) {
 	cfg := defaults()
 	for _, o := range opts {
@@ -36,8 +39,34 @@ func New(opts ...Option) (*Refresher, error) {
 	if cfg.rebuild == nil {
 		missing = append(missing, "Rebuild")
 	}
+	var invalid []string
+	if cfg.workers < 1 {
+		invalid = append(invalid, "Workers")
+	}
+	if cfg.coalesce < 0 {
+		invalid = append(invalid, "Coalesce")
+	}
+	if cfg.maxWait < 0 {
+		invalid = append(invalid, "MaxWait")
+	}
+	if cfg.backoffBase < 0 || cfg.backoffCap < 0 {
+		invalid = append(invalid, "Backoff")
+	}
+	if cfg.poisonAfter < 1 {
+		invalid = append(invalid, "PoisonAfter")
+	}
+	if cfg.enumerate != nil && cfg.reconcileEvery <= 0 {
+		invalid = append(invalid, "Reconcile")
+	}
+	var problems []string
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("cdcfresh: missing required options: %s", strings.Join(missing, ", "))
+		problems = append(problems, fmt.Sprintf("missing required options: %s", strings.Join(missing, ", ")))
+	}
+	if len(invalid) > 0 {
+		problems = append(problems, fmt.Sprintf("invalid option values: %s", strings.Join(invalid, ", ")))
+	}
+	if len(problems) > 0 {
+		return nil, fmt.Errorf("cdcfresh: %s", strings.Join(problems, "; "))
 	}
 	return &Refresher{
 		cfg: cfg,
@@ -51,8 +80,12 @@ func New(opts ...Option) (*Refresher, error) {
 
 // Run consumes the source, coalesces dirty keys, and drives rebuilds until
 // ctx is cancelled (returns ctx.Err()) or the source fails (returns the
-// wrapped error). Call it once per Refresher.
+// wrapped error). A Refresher is single-use: call Run once; a second call
+// returns an error without starting anything.
 func (r *Refresher) Run(ctx context.Context) error {
+	if !r.started.CompareAndSwap(false, true) {
+		return errors.New("cdcfresh: Run already called; create a new Refresher")
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -170,6 +203,9 @@ func (r *Refresher) workerLoop(ctx context.Context, work <-chan Key) {
 			return
 		case k := <-work:
 			err := r.cfg.rebuild(ctx, k)
+			if err != nil && ctx.Err() != nil {
+				return // shutdown surrenders the whole dirty set (D6/D9)
+			}
 			r.mu.Lock()
 			poisoned := r.dirty.complete(k, err, time.Now())
 			r.mu.Unlock()

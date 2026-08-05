@@ -146,6 +146,70 @@ func TestRunSurfacesFailuresAndPoison(t *testing.T) {
 	<-done
 }
 
+func TestRunCalledTwiceReturnsError(t *testing.T) {
+	src := &fakeSource{}
+	r, err := New(
+		Source(src), Scope(keyScope),
+		Rebuild(func(context.Context, Key) error { return nil }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // first Run can be cancelled immediately
+	if err := r.Run(ctx); err != context.Canceled {
+		t.Fatalf("first Run() = %v, want context.Canceled", err)
+	}
+	err = r.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "already") {
+		t.Fatalf("second Run() = %v, want error mentioning \"already\"", err)
+	}
+}
+
+func TestWorkerLoopSilentOnCancelledRebuild(t *testing.T) {
+	rebuildStarted := make(chan struct{})
+	var onErrorCalls atomic.Int64
+	src := &fakeSource{queue: []Event{{Row: rowFor("stuck")}}}
+	r, err := New(
+		Source(src), Scope(keyScope),
+		Rebuild(func(ctx context.Context, k Key) error {
+			close(rebuildStarted)
+			<-ctx.Done()
+			return ctx.Err()
+		}),
+		Coalesce(time.Millisecond), MaxWait(10*time.Millisecond),
+		OnError(func(error) { onErrorCalls.Add(1) }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	select {
+	case <-rebuildStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rebuild never started")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+	if n := onErrorCalls.Load(); n != 0 {
+		t.Errorf("OnError called %d times, want 0", n)
+	}
+	s := r.Stats()
+	if s.RebuildsFailed != 0 {
+		t.Errorf("RebuildsFailed = %d, want 0", s.RebuildsFailed)
+	}
+	if s.PoisonedKeys != 0 {
+		t.Errorf("PoisonedKeys = %d, want 0", s.PoisonedKeys)
+	}
+}
+
 func TestReconcileStartupSweepAndInterval(t *testing.T) {
 	var rebuilds atomic.Int64
 	var enumerations atomic.Int64
