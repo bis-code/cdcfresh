@@ -196,4 +196,35 @@ func (r *Refresher) wake() {
 	}
 }
 
-func (r *Refresher) reconcileLoop(ctx context.Context) { <-ctx.Done() }
+// reconcileLoop runs one sweep immediately (heals failover takeover, D7/D9)
+// then one per interval. Sweep keys flow through the normal pipeline.
+func (r *Refresher) reconcileLoop(ctx context.Context) {
+	sweep := func() {
+		keys, err := r.cfg.enumerate(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				r.cfg.onError(fmt.Errorf("cdcfresh: reconcile enumerate: %w", err))
+			}
+			return
+		}
+		now := time.Now()
+		r.mu.Lock()
+		for _, k := range keys {
+			r.dirty.markReconcile(k, now)
+		}
+		r.mu.Unlock()
+		r.stats.reconciles.Add(1)
+		r.wake()
+	}
+	sweep()
+	ticker := time.NewTicker(r.cfg.reconcileEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
+		}
+	}
+}
