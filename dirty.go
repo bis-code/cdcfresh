@@ -96,6 +96,65 @@ func (d *dirtySet) complete(k Key, rebuildErr error, now time.Time) (poisoned bo
 		}
 		return false
 	}
-	// failure path: Task 5
+	st.fails++
+	if st.fails >= d.poisonAfter {
+		st.poisoned = true
+		return true
+	}
+	st.retryAt = now.Add(d.backoff(st.fails))
+	d.order = append(d.order, k)
 	return false
+}
+
+// markReconcile enqueues a sweep key. Unlike mark it revives poisoned
+// keys (D5: reconcile is their retry of last resort). Healthy keys that
+// are already queued are left untouched so a sweep never delays them.
+func (d *dirtySet) markReconcile(k Key, now time.Time) {
+	st, ok := d.entries[k]
+	if !ok {
+		d.mark(k, now)
+		return
+	}
+	switch {
+	case st.poisoned:
+		st.poisoned = false
+		st.retryAt = now
+		d.order = append(d.order, k)
+	case st.inFlight:
+		st.redirty = true
+	}
+}
+
+// nextWake returns the earliest instant any queued key becomes ready.
+func (d *dirtySet) nextWake(now time.Time) (time.Time, bool) {
+	var earliest time.Time
+	found := false
+	for _, k := range d.order {
+		st := d.entries[k]
+		var t time.Time
+		if st.fails > 0 {
+			t = st.retryAt
+		} else {
+			t = st.lastEvent.Add(d.coalesce)
+			if aged := st.firstDirty.Add(d.maxWait); aged.Before(t) {
+				t = aged
+			}
+		}
+		if !found || t.Before(earliest) {
+			earliest, found = t, true
+		}
+	}
+	return earliest, found
+}
+
+// counts reports queue-depth gauges for Stats.
+func (d *dirtySet) counts() (dirty, poisoned int) {
+	for _, st := range d.entries {
+		if st.poisoned {
+			poisoned++
+		} else {
+			dirty++
+		}
+	}
+	return dirty, poisoned
 }

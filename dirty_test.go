@@ -1,6 +1,7 @@
 package cdcfresh
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -128,5 +129,96 @@ func TestRedirtyReentersAtTail(t *testing.T) {
 	k2, _ := d.pop(late)
 	if k1 != "b" || k2 != "a" {
 		t.Fatalf("want b then a (tail re-entry), got %q,%q", k1, k2)
+	}
+}
+
+func popAndFail(d *dirtySet, k Key, at time.Time) bool {
+	got, ok := d.pop(at)
+	if !ok || got != k {
+		panic("test setup: expected " + string(k) + " ready")
+	}
+	return d.complete(k, errStub, at)
+}
+
+var errStub = errors.New("rebuild failed")
+
+func TestFailureSchedulesRetryWithBackoff(t *testing.T) {
+	d := newTestSet() // stub backoff: attempt n → n seconds
+	d.mark("a", t0)
+	at := t0.Add(10 * time.Second)
+	if poisoned := popAndFail(d, "a", at); poisoned {
+		t.Fatal("first failure must not poison")
+	}
+	if k, ok := d.pop(at.Add(999 * time.Millisecond)); ok {
+		t.Fatalf("popped %q before retryAt", k)
+	}
+	if _, ok := d.pop(at.Add(time.Second)); !ok {
+		t.Fatal("want ready at retryAt (attempt 1 → +1s)")
+	}
+}
+
+func TestPoisonAfterConsecutiveFailures(t *testing.T) {
+	d := newTestSet() // poisonAfter = 3
+	d.mark("a", t0)
+	at := t0.Add(10 * time.Second)
+	if popAndFail(d, "a", at) { // fail 1
+		t.Fatal("poisoned too early")
+	}
+	at = at.Add(time.Second)
+	if popAndFail(d, "a", at) { // fail 2
+		t.Fatal("poisoned too early")
+	}
+	at = at.Add(2 * time.Second)
+	if !popAndFail(d, "a", at) { // fail 3 → poison, reported once
+		t.Fatal("want poisoned=true on 3rd failure")
+	}
+	if k, ok := d.pop(at.Add(time.Hour)); ok {
+		t.Fatalf("poisoned key %q popped", k)
+	}
+	d.mark("a", at.Add(time.Minute)) // CDC events ignored while poisoned
+	if k, ok := d.pop(at.Add(2 * time.Hour)); ok {
+		t.Fatalf("mark revived poisoned key %q", k)
+	}
+	if dirty, poisoned := d.counts(); poisoned != 1 || dirty != 0 {
+		t.Fatalf("counts: dirty=%d poisoned=%d", dirty, poisoned)
+	}
+}
+
+func TestReconcileRevivesPoisonedKey(t *testing.T) {
+	d := newTestSet()
+	d.mark("a", t0)
+	at := t0.Add(10 * time.Second)
+	popAndFail(d, "a", at)
+	at = at.Add(time.Second)
+	popAndFail(d, "a", at)
+	at = at.Add(2 * time.Second)
+	popAndFail(d, "a", at) // poisoned
+	d.markReconcile("a", at.Add(time.Minute))
+	k, ok := d.pop(at.Add(time.Minute)) // immediately ready (retryAt = now)
+	if !ok || k != "a" {
+		t.Fatalf("reconcile must revive poisoned key, got %q %v", k, ok)
+	}
+	if d.complete("a", nil, at.Add(2*time.Minute)) {
+		t.Fatal("success after revive must not poison")
+	}
+	if _, poisoned := d.counts(); poisoned != 0 {
+		t.Fatal("success must clear poison accounting")
+	}
+}
+
+func TestNextWake(t *testing.T) {
+	d := newTestSet()
+	if _, ok := d.nextWake(t0); ok {
+		t.Fatal("empty set has no wake time")
+	}
+	d.mark("a", t0) // quiet deadline t0+5s, maxWait t0+30s
+	w, ok := d.nextWake(t0)
+	if !ok || !w.Equal(t0.Add(5*time.Second)) {
+		t.Fatalf("want wake t0+5s, got %v %v", w, ok)
+	}
+	d.mark("a", t0.Add(28*time.Second)) // quiet t0+33s vs maxWait t0+30s
+	w, _ = d.nextWake(t0.Add(28 * time.Second))
+	if !w.Equal(t0.Add(30 * time.Second)) {
+		t.Fatalf("want maxWait deadline t0+30s, got %v", w)
 	}
 }
