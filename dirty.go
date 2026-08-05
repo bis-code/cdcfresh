@@ -75,3 +75,27 @@ func (d *dirtySet) ready(st *keyState, now time.Time) bool {
 	return !now.Before(st.lastEvent.Add(d.coalesce)) ||
 		!now.Before(st.firstDirty.Add(d.maxWait))
 }
+
+// complete records a finished rebuild. Success clears failure history and
+// either removes the key or, if it was re-dirtied mid-rebuild, re-enters
+// it at the FIFO tail as fresh-dirty at now (invariant 2).
+func (d *dirtySet) complete(k Key, rebuildErr error, now time.Time) (poisoned bool) {
+	st, ok := d.entries[k]
+	if !ok {
+		return false
+	}
+	st.inFlight = false
+	if rebuildErr == nil {
+		st.fails = 0
+		if st.redirty {
+			st.redirty = false
+			st.firstDirty, st.lastEvent = now, now
+			d.order = append(d.order, k)
+		} else {
+			delete(d.entries, k)
+		}
+		return false
+	}
+	// failure path: Task 5
+	return false
+}
