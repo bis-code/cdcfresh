@@ -8,3 +8,9 @@ coverage.*
 .idea/
 .vscode/
 .DS_Store
+
+# Maintainer tooling & session artifacts (private, never pushed)
+.claude/
+.superpowers/
+.leann/
+docs/superpowers/
