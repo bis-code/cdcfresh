@@ -6,8 +6,8 @@ Keep rollup/lookup/read-model tables fresh without SQL triggers, stored
 procedures, or cron-scan waste: change-data-capture events are the doorbell,
 your own SQL is the recipe, cdcfresh is the orchestration in between.
 
-> Status: seed. Nothing is built yet — see `docs/HANDOFF.md` for the design
-> session entry point.
+> Status: core loop implemented (design record: `docs/design.md`). Pulsar
+> source adapter and test harness are in progress; API may still shift.
 
 ## The pattern
 
