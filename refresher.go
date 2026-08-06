@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,8 +13,12 @@ import (
 // Refresher orchestrates the CDC→coalesce→rebuild loop. Create with New,
 // start with Run.
 type Refresher struct {
-	cfg     config
-	mu      sync.Mutex // guards dirty
+	cfg config
+	// mu guards dirty. All dirtySet access happens under mu; no user
+	// callback (Scope, Rebuild, OnError, enumerate) is ever invoked while
+	// holding it — those run either before mu is taken or after it is
+	// released.
+	mu      sync.Mutex
 	dirty   *dirtySet
 	nudge   chan struct{}
 	stats   stats
@@ -29,44 +32,8 @@ func New(opts ...Option) (*Refresher, error) {
 	for _, o := range opts {
 		o(&cfg)
 	}
-	var missing []string
-	if cfg.source == nil {
-		missing = append(missing, "Source")
-	}
-	if cfg.scope == nil {
-		missing = append(missing, "Scope")
-	}
-	if cfg.rebuild == nil {
-		missing = append(missing, "Rebuild")
-	}
-	var invalid []string
-	if cfg.workers < 1 {
-		invalid = append(invalid, "Workers")
-	}
-	if cfg.coalesce < 0 {
-		invalid = append(invalid, "Coalesce")
-	}
-	if cfg.maxWait < 0 {
-		invalid = append(invalid, "MaxWait")
-	}
-	if cfg.backoffBase < 0 || cfg.backoffCap < 0 {
-		invalid = append(invalid, "Backoff")
-	}
-	if cfg.poisonAfter < 1 {
-		invalid = append(invalid, "PoisonAfter")
-	}
-	if cfg.enumerate != nil && cfg.reconcileEvery <= 0 {
-		invalid = append(invalid, "Reconcile")
-	}
-	var problems []string
-	if len(missing) > 0 {
-		problems = append(problems, fmt.Sprintf("missing required options: %s", strings.Join(missing, ", ")))
-	}
-	if len(invalid) > 0 {
-		problems = append(problems, fmt.Sprintf("invalid option values: %s", strings.Join(invalid, ", ")))
-	}
-	if len(problems) > 0 {
-		return nil, fmt.Errorf("cdcfresh: %s", strings.Join(problems, "; "))
+	if err := cfg.validate(); err != nil {
+		return nil, err
 	}
 	return &Refresher{
 		cfg: cfg,
@@ -147,8 +114,8 @@ func (r *Refresher) receiveLoop(ctx context.Context) error {
 			for _, k := range keys {
 				r.dirty.mark(k, now)
 			}
-			r.mu.Unlock()
 			r.stats.keysMarked.Add(uint64(len(keys)))
+			r.mu.Unlock()
 			r.wake()
 		}
 		if ev.Ack != nil { // D6: ack after enqueue, never after rebuild

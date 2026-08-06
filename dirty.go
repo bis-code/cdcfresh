@@ -60,7 +60,9 @@ func (d *dirtySet) pop(now time.Time) (Key, bool) {
 		if !d.ready(st, now) {
 			continue
 		}
-		d.order = append(d.order[:i:i], d.order[i+1:]...)
+		// In-place is safe: nothing outside dirtySet holds a reference to
+		// order, and pop returns immediately after this mutation.
+		d.order = append(d.order[:i], d.order[i+1:]...)
 		st.inFlight = true
 		st.redirty = false
 		return k, true

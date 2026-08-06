@@ -48,6 +48,10 @@ type RowEvent struct {
 	PKNames  []string
 	Data     map[string]any // new row image (Insert/Update)
 	Old      map[string]any // previous row image (Update/Delete)
+
+	// CommitTs is a source-defined ordering token, monotonic within one
+	// source (e.g. a TiCDC TSO, a Debezium ts_ms, a binlog position). It is
+	// not wall-clock time and not comparable across sources.
 	CommitTs uint64
 }
 
@@ -74,7 +78,9 @@ type EventSource interface {
 // continues consuming.
 var ErrSkip = errors.New("cdcfresh: event skipped")
 
-// ScopeFunc maps a row event to the derived-table scopes it dirties.
+// ScopeFunc maps a row event to the derived-table scopes it dirties. It runs
+// inline in the receive loop: keep it pure and fast — a slow Scope throttles
+// receive, and therefore ack (D6).
 type ScopeFunc func(RowEvent) []Key
 
 // RebuildFunc recomputes one scope from the source tables. It must be

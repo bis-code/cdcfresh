@@ -1,6 +1,10 @@
 package cdcfresh
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // Option configures a Refresher. Source, Scope, and Rebuild are required;
 // New reports every missing one in a single error.
@@ -19,6 +23,51 @@ type config struct {
 	onError        func(error)
 	reconcileEvery time.Duration
 	enumerate      EnumerateFunc
+}
+
+// validate reports every missing required option, and every option given
+// an invalid value, in one error.
+func (c *config) validate() error {
+	var missing []string
+	if c.source == nil {
+		missing = append(missing, "Source")
+	}
+	if c.scope == nil {
+		missing = append(missing, "Scope")
+	}
+	if c.rebuild == nil {
+		missing = append(missing, "Rebuild")
+	}
+	var invalid []string
+	if c.workers < 1 {
+		invalid = append(invalid, "Workers")
+	}
+	if c.coalesce < 0 {
+		invalid = append(invalid, "Coalesce")
+	}
+	if c.maxWait < 0 {
+		invalid = append(invalid, "MaxWait")
+	}
+	if c.backoffBase < 0 || c.backoffCap < 0 {
+		invalid = append(invalid, "Backoff")
+	}
+	if c.poisonAfter < 1 {
+		invalid = append(invalid, "PoisonAfter")
+	}
+	if c.enumerate != nil && c.reconcileEvery <= 0 {
+		invalid = append(invalid, "Reconcile")
+	}
+	var problems []string
+	if len(missing) > 0 {
+		problems = append(problems, fmt.Sprintf("missing required options: %s", strings.Join(missing, ", ")))
+	}
+	if len(invalid) > 0 {
+		problems = append(problems, fmt.Sprintf("invalid option values: %s", strings.Join(invalid, ", ")))
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("cdcfresh: %s", strings.Join(problems, "; "))
+	}
+	return nil
 }
 
 func defaults() config {
