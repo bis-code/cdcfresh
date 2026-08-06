@@ -139,11 +139,27 @@ func TestRunSurfacesFailuresAndPoison(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- r.Run(ctx) }()
 
+	// hasPoison reads errs under its mutex — the only safe way to read it,
+	// since OnError appends to it from a worker goroutine.
+	hasPoison := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, e := range errs {
+			if strings.Contains(e, "poisoned after 2") {
+				return true
+			}
+		}
+		return false
+	}
+	// Poll for the poison OnError report directly, not Stats().PoisonedKeys:
+	// dirty.complete marks the key poisoned (visible via Stats) before
+	// workerLoop's corresponding onError call for it has necessarily run,
+	// so gating on the gauge raced the report this assertion depends on.
 	deadline := time.After(2 * time.Second)
-	for r.Stats().PoisonedKeys == 0 {
+	for !hasPoison() {
 		select {
 		case <-deadline:
-			t.Fatal("bad key never poisoned")
+			t.Fatal("bad key never reported as poisoned via OnError")
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
@@ -151,18 +167,16 @@ func TestRunSurfacesFailuresAndPoison(t *testing.T) {
 		t.Errorf("good key must rebuild despite bad key, got %d", goodRebuilds.Load())
 	}
 	mu.Lock()
-	var sawRebuildErr, sawPoison bool
+	var sawRebuildErr bool
 	for _, e := range errs {
 		if strings.Contains(e, `rebuild "bad"`) {
 			sawRebuildErr = true
 		}
-		if strings.Contains(e, "poisoned after 2") {
-			sawPoison = true
-		}
 	}
+	errsSnapshot := append([]string(nil), errs...) // copy: safe to read after mu.Unlock()
 	mu.Unlock()
-	if !sawRebuildErr || !sawPoison {
-		t.Errorf("OnError missing rebuild/poison reports: %v", errs)
+	if !sawRebuildErr {
+		t.Errorf("OnError missing rebuild-failure report: %v", errsSnapshot)
 	}
 	cancel()
 	<-done
