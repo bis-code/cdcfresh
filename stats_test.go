@@ -18,3 +18,20 @@ func TestStatsSnapshot(t *testing.T) {
 		t.Errorf("snapshot wrong: %+v", s)
 	}
 }
+
+func TestStatsTimestampsZeroBeforeActivity(t *testing.T) {
+	r, err := New(requiredOpts()...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := r.Stats()
+	if !s.LastEvent.IsZero() {
+		t.Errorf("LastEvent = %v, want zero before any event", s.LastEvent)
+	}
+	if !s.LastRebuild.IsZero() {
+		t.Errorf("LastRebuild = %v, want zero before any rebuild", s.LastRebuild)
+	}
+	if s.EventsSkipped != 0 {
+		t.Errorf("EventsSkipped = %d, want 0", s.EventsSkipped)
+	}
+}

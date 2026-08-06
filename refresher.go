@@ -131,12 +131,18 @@ func (r *Refresher) receiveLoop(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil
 			}
+			if errors.Is(err, ErrSkip) {
+				r.stats.eventsSkipped.Add(1)
+				r.cfg.onError(err)
+				continue
+			}
 			return fmt.Errorf("cdcfresh: source: %w", err)
 		}
 		r.stats.eventsReceived.Add(1)
+		now := time.Now()
+		r.stats.lastEventNanos.Store(now.UnixNano())
 		keys := r.cfg.scope(ev.Row)
 		if len(keys) > 0 {
-			now := time.Now()
 			r.mu.Lock()
 			for _, k := range keys {
 				r.dirty.mark(k, now)
@@ -217,6 +223,7 @@ func (r *Refresher) workerLoop(ctx context.Context, work <-chan Key) {
 				}
 			} else {
 				r.stats.rebuildsOK.Add(1)
+				r.stats.lastRebuildNanos.Store(time.Now().UnixNano())
 			}
 			r.wake() // redirty/retry re-entries may need scheduling
 		}

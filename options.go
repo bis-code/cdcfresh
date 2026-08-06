@@ -61,7 +61,7 @@ func Backoff(base, max time.Duration) Option {
 // a reconcile sweep re-admits it.
 func PoisonAfter(n int) Option { return func(c *config) { c.poisonAfter = n } }
 
-// OnError receives decode, rebuild, poison, and reconcile errors.
+// OnError receives skipped-event, rebuild, poison, and reconcile errors.
 func OnError(f func(error)) Option { return func(c *config) { c.onError = f } }
 
 // Reconcile schedules a healing sweep: enumerate lists the live key

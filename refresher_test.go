@@ -2,12 +2,34 @@ package cdcfresh
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// seqSource replays a fixed sequence of (Event, error) responses in order,
+// then blocks until ctx is done.
+type seqSource struct {
+	mu  sync.Mutex
+	seq []func() (Event, error)
+}
+
+func (s *seqSource) Receive(ctx context.Context) (Event, error) {
+	s.mu.Lock()
+	if len(s.seq) > 0 {
+		fn := s.seq[0]
+		s.seq = s.seq[1:]
+		s.mu.Unlock()
+		return fn()
+	}
+	s.mu.Unlock()
+	<-ctx.Done()
+	return Event{}, ctx.Err()
+}
 
 // fakeSource delivers queued events then blocks until ctx is done.
 type fakeSource struct {
@@ -243,4 +265,107 @@ func TestReconcileStartupSweepAndInterval(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+func TestReceiveLoopSkipsErrSkipWrappedErrors(t *testing.T) {
+	var rebuilds atomic.Int64
+	var mu sync.Mutex
+	var onErrs []error
+	src := &seqSource{seq: []func() (Event, error){
+		func() (Event, error) { return Event{Row: rowFor("a")}, nil },
+		func() (Event, error) { return Event{}, fmt.Errorf("%w: undecodable message", ErrSkip) },
+		func() (Event, error) { return Event{Row: rowFor("b")}, nil },
+	}}
+	r, err := New(
+		Source(src), Scope(keyScope),
+		Rebuild(func(_ context.Context, k Key) error { rebuilds.Add(1); return nil }),
+		Coalesce(time.Millisecond), MaxWait(10*time.Millisecond),
+		OnError(func(e error) { mu.Lock(); onErrs = append(onErrs, e); mu.Unlock() }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	deadline := time.After(2 * time.Second)
+	for rebuilds.Load() < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("want 2 rebuilds (a and b), got %d", rebuilds.Load())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+
+	if s := r.Stats().EventsSkipped; s != 1 {
+		t.Errorf("EventsSkipped = %d, want 1", s)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(onErrs) != 1 {
+		t.Fatalf("OnError called %d times, want 1: %v", len(onErrs), onErrs)
+	}
+	if !errors.Is(onErrs[0], ErrSkip) {
+		t.Errorf("OnError arg %v does not satisfy errors.Is(err, ErrSkip)", onErrs[0])
+	}
+}
+
+func TestStatsTimestampsAfterActivity(t *testing.T) {
+	start := time.Now()
+	src := &fakeSource{queue: []Event{{Row: rowFor("a")}}}
+	r, err := New(
+		Source(src), Scope(keyScope),
+		Rebuild(func(context.Context, Key) error { return nil }),
+		Coalesce(time.Millisecond), MaxWait(10*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	deadline := time.After(2 * time.Second)
+	for r.Stats().RebuildsOK == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("no rebuild within 2s")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	s := r.Stats()
+	cancel()
+	<-done
+
+	if s.LastEvent.Before(start) {
+		t.Errorf("LastEvent = %v, want at/after test start %v", s.LastEvent, start)
+	}
+	if s.LastRebuild.Before(start) {
+		t.Errorf("LastRebuild = %v, want at/after test start %v", s.LastRebuild, start)
+	}
+}
+
+func TestReceiveLoopFatalErrorStillKillsRun(t *testing.T) {
+	fatal := errors.New("connection lost")
+	src := &seqSource{seq: []func() (Event, error){
+		func() (Event, error) { return Event{}, fatal },
+	}}
+	r, err := New(
+		Source(src), Scope(keyScope),
+		Rebuild(func(context.Context, Key) error { return nil }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runErr := r.Run(context.Background())
+	if runErr == nil || !errors.Is(runErr, fatal) {
+		t.Fatalf("Run() = %v, want an error wrapping %v", runErr, fatal)
+	}
 }
