@@ -9,12 +9,23 @@ CHANGEFEED_ID="${CHANGEFEED_ID:-cdcfresh}"
 TIMEOUT="${TIMEOUT:-180}"
 cd "$(dirname "$0")"
 
+# A container that exits takes the whole stack with it, but every readiness
+# probe just keeps timing out — so report the corpse instead of the symptom.
+dead() { docker compose ps --status=exited --format '{{.Service}}' 2>/dev/null; }
+
 wait_for() {
-	local name=$1 probe=$2 deadline=$((SECONDS + TIMEOUT))
+	local name=$1 probe=$2 deadline=$((SECONDS + TIMEOUT)) gone
 	printf 'waiting for %s' "$name"
 	until eval "$probe" >/dev/null 2>&1; do
+		gone=$(dead)
+		if [ -n "$gone" ]; then
+			printf '\n%s never came up: container(s) exited: %s\n' "$name" "$(echo "$gone" | tr '\n' ' ')" >&2
+			docker compose logs --tail=20 $gone >&2
+			return 1
+		fi
 		if ((SECONDS >= deadline)); then
 			printf ' timed out after %ss\n' "$TIMEOUT" >&2
+			docker compose ps >&2
 			return 1
 		fi
 		printf '.'

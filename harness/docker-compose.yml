@@ -22,6 +22,14 @@ services:
       - --advertise-addr=tikv:20160
       - --data-dir=/tmp/tikv
       - --pd=pd:2379
+    # TiKV refuses to boot below ~123k open files and exits FATAL on the spot.
+    # Docker Desktop grants far more than that by default, so this only bites on
+    # Linux CI runners, where the ceiling is 65536 — the cluster then dies one
+    # second in and every later wait times out against a corpse.
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
     depends_on: [pd]
 
   tidb:
