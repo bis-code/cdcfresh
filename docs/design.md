@@ -283,14 +283,16 @@ directive enforces the floor.
 
 ## Amendments — 2026-08-06 (post-implementation architecture review)
 
-- **A1 (amends D3/D11) — decoder location: `internal/canal`.** The canal-json
-  decode structs live in `internal/canal` (importing the root package for
-  `RowEvent`/`EventType`), not in the root package: unexported-in-root is
-  unreachable from `cdcfresh/pulsar`, and exported-in-root would make a
-  TiCDC-format parser permanent public API of the format-neutral package.
-  `internal/` is importable module-wide, invisible to users, and promotable
-  to a public `cdcfresh/canal` later without a break. DDL/watermark
-  drop-by-default becomes a canal/pulsar option accordingly.
+- **A1 (amends D3/D11) — decoder lives under `internal/`** (package name
+  refined to `internal/canaljson` by A5 — read them together). The canal-json
+  decode structs live there, importing the root package for
+  `RowEvent`/`EventType`, rather than in the root package itself:
+  unexported-in-root is unreachable from `cdcfresh/pulsar`, and
+  exported-in-root would make a TiCDC-format parser permanent public API of
+  the format-neutral package. `internal/` is importable module-wide,
+  invisible to users, and promotable to a public package later without a
+  break. DDL/watermark drop-by-default becomes a decoder/adapter option
+  accordingly.
 - **A2 (amends D3/D8) — non-fatal skip lane: `ErrSkip`.** `EventSource`
   errors were originally all fatal, leaving D3's "decode failures are
   surfaced, counted, skipped" with no route into the core. An exported
