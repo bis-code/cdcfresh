@@ -301,6 +301,34 @@ directive enforces the floor.
 - **A3 (amends D1) — `New` validates values, not just presence** (workers,
   durations, poison threshold, reconcile interval), and `Run` is enforced
   single-use via an atomic guard — both landed with the core loop.
+- **A4 (extends D11) — adapter layout: subpackages now, separate modules
+  when the second adapter lands.** `pulsar/` (and later `kafka/`) are
+  subdirectories of the root module today. The import path
+  `github.com/bis-code/cdcfresh/pulsar` is identical whether that directory
+  is a subpackage or its own module, so promoting it to a separate module
+  later changes nothing for users — the split is deferred until adapter #2
+  exists or the root module's dependency graph becomes a burden. Rejected:
+  multi-module monorepo from day one (testcontainers-go pattern — per-module
+  release tagging and a CI matrix paid before a second adapter exists);
+  separate repositories per adapter (watermill / database-sql pattern — N
+  repos and cross-repo version coordination for a solo pre-v1 project);
+  single module with adapters as subpackages forever (gocloud.dev pattern —
+  every consumer of the core inherits every broker's dependency graph, which
+  contradicts the embeddability principle).
+- **A5 (refines A1) — decoder package is `internal/canaljson`.** The
+  package names the wire *format*, not the transport, which is why one copy
+  serves both a Pulsar and a future Kafka adapter (TiCDC sinks canal-json to
+  either). `canaljson` over `canal`: "Canal" alone is the name of the
+  upstream MySQL CDC project, whereas `canal-json` is the format TiCDC
+  actually names in its changefeed config. A verified Go rule makes this
+  safe under A4: a nested *separate* module may still import the parent
+  module's `internal/` tree, since the internal restriction is enforced on
+  the import-path prefix rather than the module boundary — so the decoder
+  stays shared even after adapters split into their own modules. Rejected:
+  `internal/canal` (ambiguous with the upstream project); a public
+  `cdcfresh/canaljson` (commits a decoder to public API before any third
+  party needs it — promotable later without a break, un-exporting would
+  not be).
 
 ## Out of scope (unchanged from README)
 

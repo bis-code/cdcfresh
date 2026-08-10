@@ -71,6 +71,26 @@ refresher.Run(ctx)
 | Lag/health counters (expvar or prometheus) | Serving reads, HTTP anything |
 | Throwaway harness: compose/testcontainers with TiDB + TiCDC + Pulsar | Multi-instance coordination (single consumer assumed; document failover subscription) |
 
+## Repository layout
+
+```
+cdcfresh/            root package — import "github.com/bis-code/cdcfresh"
+├── event.go         public contract: Key, RowEvent, Event, EventSource, ErrSkip
+├── options.go       Option constructors + validation
+├── refresher.go     Refresher, New, Run
+├── loops.go         receive / schedule / worker / reconcile goroutines
+├── coalesce.go      dirty-set state machine (pure, explicit clock)
+├── backoff.go       retry delay
+├── stats.go         atomic counters + Stats snapshot
+├── internal/
+│   └── canaljson/   [planned] canal-json decoder — shared by all transports
+├── pulsar/          [planned] Pulsar EventSource adapter
+└── harness/         [planned] TiDB + TiCDC + Pulsar stack for the dev loop and e2e
+```
+
+The root package is stdlib-only; each transport adapter keeps its client
+dependency in its own subdirectory.
+
 ## Prior art / positioning
 
 - **Debezium** — the CDC heavyweight, Java, owns capture + delivery; cdcfresh
