@@ -71,7 +71,7 @@ cdcfresh/            root package — import "github.com/bis-code/cdcfresh"
 │   ├── canaljson/   [planned] canal-json decoder + fixtures from a real TiCDC
 │   └── testenv/     integration-tier containers: one Pulsar, one TiDB
 ├── pulsar/          [planned] Pulsar EventSource adapter
-└── test/cdcstack/   full TiDB + TiCDC + Pulsar cluster — fixture capture only
+└── test/cdcstack/   full TiDB + TiCDC + Pulsar stack for local development
 ```
 
 The root package links nothing outside the standard library, and CI proves it

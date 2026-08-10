@@ -1,18 +1,17 @@
-# The full CDC stack
+# Local CDC stack
 
-A throwaway TiDB + TiCDC + Pulsar cluster. **No test needs this.** The
-integration tier starts its own single containers (see `internal/testenv`), so
-`go test -tags=integration ./...` works with nothing running here.
-
-This stack exists for one job: re-capturing the canal-json fixtures in
-`internal/canaljson/testdata/` from a real TiCDC. Those fixtures stand in for a
-live changefeed everywhere else, so they have to come from the genuine article
-— but only when a TiDB release might have changed the wire format, which is
-rare enough that automating it would cost far more than it saves.
+The full TiDB + TiCDC + Pulsar pipeline, for running cdcfresh locally against
+real change data — write a row in TiDB, watch a rebuild fire. It is also how
+the canal-json fixtures in `internal/canaljson/testdata/` get captured.
 
 Single-node everything, no volumes: state dies with the containers.
 
-## Capturing fixtures
+The integration tier does **not** use this stack. Those tests start their own
+single containers through `internal/testenv`, so `go test -tags=integration
+./...` works with nothing running here. Bring this up when you want the real
+pipeline in front of you, not to run the suite.
+
+## Bring it up
 
 ```
 make cdcstack-up
@@ -54,7 +53,7 @@ docker compose -f test/cdcstack/docker-compose.yml exec -T pulsar \
 Save one message per event type into `internal/canaljson/testdata/`, named for
 what it is (`insert.json`, `update.json`, `delete.json`, `ddl_create.json`,
 `ddl_query.json`). Strip nothing: the decoder must tolerate the payload exactly
-as TiCDC emits it. `make cdcstack-down` when finished.
+as TiCDC emits it. `make cdcstack-down` tears the stack down.
 
 What the captured samples show, and what the decoder therefore has to handle:
 

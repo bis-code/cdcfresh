@@ -58,8 +58,8 @@ cdcfresh/            root package — import "github.com/bis-code/cdcfresh"
 │                    testdata/ holds fixtures captured from a real TiCDC
 ├── internal/testenv/ integration-tier containers: one Pulsar, one TiDB
 ├── pulsar/          [planned] Pulsar EventSource adapter
-└── test/cdcstack/   full TiDB + TiCDC + Pulsar cluster — fixture capture only,
-                     no test depends on it
+└── test/cdcstack/   full TiDB + TiCDC + Pulsar stack for running the library
+                     locally against real CDC; also how fixtures are captured
 ```
 
 ## Testing tiers
@@ -75,8 +75,12 @@ Two, split by what they prove:
 The integration tier deliberately does *not* run TiCDC. cdcfresh consumes bytes
 from a topic and cannot tell a live changefeed from a replay, so tests publish
 the committed canal-json fixtures instead of spending minutes regenerating
-payloads that already exist. `test/cdcstack` is how those fixtures get
-recaptured, by hand, when a TiDB release might have moved the wire format.
+payloads that already exist. Containers are built from the official images
+directly (`testcontainers.GenericContainer` with an explicit request), not from
+wrapper modules.
+
+`test/cdcstack` runs the whole pipeline locally for hands-on work, and is how
+fixtures get recaptured when a TiDB release might have moved the wire format.
 
 `docs/superpowers/` and `.superpowers/` are gitignored working artifacts —
 they never get committed.

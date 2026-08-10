@@ -4,17 +4,25 @@ package testenv
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/apache/pulsar-client-go/pulsar"
 	plog "github.com/apache/pulsar-client-go/pulsar/log"
-	tcpulsar "github.com/testcontainers/testcontainers-go/modules/pulsar"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// Pin the broker rather than tracking latest: a test tier that changes
-// behaviour when an upstream tag moves is not a test tier.
-const pulsarImage = "apachepulsar/pulsar:4.2.4"
+const (
+	// The same image and flags the local stack runs, pinned: a test tier that
+	// changes behaviour when an upstream tag moves is not a test tier.
+	pulsarImage       = "apachepulsar/pulsar:4.2.4"
+	pulsarServicePort = "6650/tcp"
+	pulsarAdminPort   = "8080/tcp"
+)
 
 // Pulsar is a running broker and a client connected to it.
 type Pulsar struct {
@@ -27,16 +35,51 @@ func StartPulsar(t *testing.T) *Pulsar {
 	t.Helper()
 	ctx := context.Background()
 
-	container, err := tcpulsar.Run(ctx, pulsarImage)
+	req := testcontainers.ContainerRequest{
+		Image:        pulsarImage,
+		ExposedPorts: []string{pulsarServicePort, pulsarAdminPort},
+		// -nfw/-nss drop the functions worker and stream storage: neither is
+		// used here and both add startup time.
+		Cmd: []string{"bin/pulsar", "standalone", "-nfw", "-nss"},
+		// Standalone Pulsar sizes its heap for a server by default, which is
+		// wasteful for a test broker and slow to start.
+		Env: map[string]string{
+			"PULSAR_MEM": "-Xms256m -Xmx256m -XX:MaxDirectMemorySize=256m",
+		},
+		// Both listening ports and the "messaging service is ready" log show
+		// up seconds before the standalone cluster's metadata exists, and a
+		// producer created in that window fails with TopicNotFound. The admin
+		// API naming the cluster is the first signal the namespace can
+		// actually be used.
+		WaitingFor: wait.ForAll(
+			wait.ForListeningPort(pulsarServicePort),
+			wait.ForHTTP("/admin/v2/clusters").
+				WithPort(pulsarAdminPort).
+				WithResponseMatcher(func(r io.Reader) bool {
+					body, err := io.ReadAll(r)
+					return err == nil && strings.TrimSpace(string(body)) == `["standalone"]`
+				}),
+		).WithDeadline(2 * time.Minute),
+	}
+
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          true,
+	})
 	if err != nil {
 		t.Fatalf("start pulsar: %v\nis Docker running?", err)
 	}
 	t.Cleanup(func() { container.Terminate(context.Background()) })
 
-	url, err := container.BrokerURL(ctx)
+	host, err := container.Host(ctx)
 	if err != nil {
-		t.Fatalf("pulsar broker url: %v", err)
+		t.Fatalf("pulsar host: %v", err)
 	}
+	port, err := container.MappedPort(ctx, "6650")
+	if err != nil {
+		t.Fatalf("pulsar mapped port: %v", err)
+	}
+	url := fmt.Sprintf("pulsar://%s:%s", host, port.Port())
 
 	client, err := pulsar.NewClient(pulsar.ClientOptions{
 		URL:               url,
