@@ -22,6 +22,13 @@ jobs:
         run: go vet ./...
       - name: test
         run: go test ./...
+      # go.mod legitimately carries dependencies for the adapters and the
+      # harness; the invariant is that the ROOT package still links none of
+      # them. Checking go.mod would pass while the real rule was broken.
+      - name: root package stays stdlib-only
+        run: |
+          deps=$(go list -deps . | grep -v '^github.com/bis-code/cdcfresh' | grep '\.' || true)
+          test -z "$deps" || { echo "root package pulled in non-stdlib deps:"; echo "$deps"; exit 1; }
 
   integration:
     runs-on: ubuntu-latest
@@ -31,5 +38,15 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
+      # Start the real stack: without it the tier would have nothing to run
+      # against, and a silently-skipped tier looks exactly like a passing one.
+      - name: start harness
+        run: make harness-up
       - name: integration tier
         run: make test-integration
+      - name: harness logs on failure
+        if: failure()
+        run: docker compose -f harness/docker-compose.yml logs --tail=100
+      - name: stop harness
+        if: always()
+        run: make harness-down
