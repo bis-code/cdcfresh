@@ -94,13 +94,10 @@ dependency in its own subdirectory.
 ## Testing
 
 ```
-make test              # unit tier — fakes only, no Docker, sub-second
-make test-integration  # integration tier — real TiDB + TiCDC + Pulsar via Docker
-make test-all          # both tiers
+make test              # every tier
+make test-unit         # unit tier only
+make test-integration  # integration tier — needs Docker
 ```
-
-The default run (`make test`, plain `go test ./...`) needs no Docker; only
-the integration tier does.
 
 ## Prior art / positioning
 

@@ -1,8 +1,11 @@
 .DEFAULT_GOAL := test
 
-.PHONY: test test-race test-integration test-all lint help
+.PHONY: test test-unit test-race test-integration lint help
 
-test: ## unit tier — fakes only, no Docker, sub-second (go test ./...)
+test: ## every tier — unit + integration
+	go test -tags=integration ./...
+
+test-unit: ## unit tier only
 	go test ./...
 
 test-race: ## unit tier with the race detector
@@ -19,9 +22,6 @@ test-integration: ## integration tier — packages that only build under -tags=i
 		exit 0; \
 	fi; \
 	go test -tags=integration $$only
-
-test-all: ## both tiers together (go test -tags=integration ./...)
-	go test -tags=integration ./...
 
 lint: ## gofmt check (fails if it reports files) + go vet
 	@fmt_out=$$(gofmt -l .); \

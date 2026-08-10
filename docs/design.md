@@ -338,8 +338,9 @@ directive enforces the floor.
   default and needs no Docker. A package whose files are all behind
   `//go:build integration` is silently skipped by that wildcard run
   (verified), so the fast path stays clean without excluding anything by
-  hand. A Makefile names the three selectors (`test`, `test-integration`,
-  `test-all`) so the incantations are discoverable rather than memorized.
+  hand. A Makefile names the three selectors (`test` for every tier,
+  `test-unit`, `test-integration`) so the incantations are discoverable
+  rather than memorized.
   CI runs the fast tier on every push and pull request, and the integration
   tier only nightly (`schedule`) and on manual `workflow_dispatch`, because
   container startup costs minutes and must not gate a PR. D10 named this
