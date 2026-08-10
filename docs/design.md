@@ -232,12 +232,13 @@ complexity the ephemeral principle exists to avoid. Revisit with evidence
 
 **Decision.** Both, layered. `harness/docker-compose.yml` (TiDB + TiCDC +
 Pulsar standalone + changefeed bootstrap) for interactive development —
-brought up once, iterated against. One end-to-end test drives the full loop
+brought up once, iterated against. One integration test drives the full loop
 (SQL write → TiCDC → Pulsar → rebuild observed) via testcontainers-go behind
-`//go:build e2e`, so plain `go test ./...` runs only unit tests against a fake
-Source (sub-second). Realistic e2e timing: minutes cold (image pulls), under
-~90s warm — acceptable for a separate CI job, never for the default target.
-The e2e run doubles as the golden-file capture source for D3.
+`//go:build integration`, so plain `go test ./...` runs only unit tests
+against a fake Source (sub-second). Realistic integration timing: minutes
+cold (image pulls), under ~90s warm — acceptable for a separate CI job, never
+for the default target. The integration run doubles as the golden-file
+capture source for D3.
 
 **Rationale.** The two tools serve different loops: compose amortizes startup
 for humans; testcontainers makes CI self-contained and can even reuse the
@@ -264,7 +265,7 @@ Linux-only CI exists to catch.
 - MIT `LICENSE`, copyright "2026 bis-code" (GitHub identity, consistent with
   the public-repo authorship).
 - CI: GitHub Actions on `ubuntu-latest` — gofmt check, `go vet`, `go test`
-  (unit only); the e2e job from D10 is added when the harness lands.
+  (unit only); the integration job from D10 is added when the harness lands.
 - `.gitignore`: Go binaries/coverage artifacts, editor and OS noise.
 - Roadmap: `now`/`next` labels + seed issues on GitHub after the repo is
   created (queued as a manual step — no remote exists yet).
@@ -331,6 +332,30 @@ directive enforces the floor.
   `cdcfresh/canaljson` (commits a decoder to public API before any third
   party needs it — promotable later without a break, un-exporting would
   not be).
+- **A6 (amends D10) — tier selector is a single build tag, `integration`,
+  with terminology corrected from D10's "e2e."** The unit/integration split
+  is one tag: unit tests stay untagged, so `go test ./...` remains the fast
+  default and needs no Docker. A package whose files are all behind
+  `//go:build integration` is silently skipped by that wildcard run
+  (verified), so the fast path stays clean without excluding anything by
+  hand. A Makefile names the three selectors (`test`, `test-integration`,
+  `test-all`) so the incantations are discoverable rather than memorized.
+  CI runs the fast tier on every push and pull request, and the integration
+  tier only nightly (`schedule`) and on manual `workflow_dispatch`, because
+  container startup costs minutes and must not gate a PR. D10 named this
+  "e2e," but end-to-end describes a complete user-facing flow through a
+  deployed system, which a library — with no user-facing entry point — does
+  not have; these tests verify cdcfresh against real infrastructure (TiDB +
+  TiCDC + Pulsar) rather than fakes, which is integration testing, not
+  end-to-end testing.
+
+  **Rejected.** *Two tags (`integration` + `e2e`)* — a four-way selector
+  matrix for a library this size, with the boundary between the two
+  arguable in every case. *`testing.Short()` alone* — communicates intent
+  but cannot keep Docker-dependent code out of the default build the way an
+  unmet build tag does. *A separate top-level `test/integration/` tree* —
+  divorces tests from the package they exercise, and the tag already
+  provides the separation without moving files.
 
 ## Out of scope (unchanged from README)
 

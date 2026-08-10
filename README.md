@@ -85,11 +85,22 @@ cdcfresh/            root package — import "github.com/bis-code/cdcfresh"
 ├── internal/
 │   └── canaljson/   [planned] canal-json decoder — shared by all transports
 ├── pulsar/          [planned] Pulsar EventSource adapter
-└── harness/         [planned] TiDB + TiCDC + Pulsar stack for the dev loop and e2e
+└── harness/         [planned] TiDB + TiCDC + Pulsar stack for the dev loop and integration tests
 ```
 
 The root package is stdlib-only; each transport adapter keeps its client
 dependency in its own subdirectory.
+
+## Testing
+
+```
+make test              # unit tier — fakes only, no Docker, sub-second
+make test-integration  # integration tier — real TiDB + TiCDC + Pulsar via Docker
+make test-all          # both tiers
+```
+
+The default run (`make test`, plain `go test ./...`) needs no Docker; only
+the integration tier does.
 
 ## Prior art / positioning
 
