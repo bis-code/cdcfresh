@@ -54,10 +54,11 @@ cdcfresh/            root package — import "github.com/bis-code/cdcfresh"
 ├── coalesce.go      dirty-set state machine (pure, explicit clock)
 ├── backoff.go       retry delay
 ├── stats.go         atomic counters + Stats snapshot
-├── internal/canaljson/ [planned] canal-json decoder — shared by all transports;
+├── internal/canaljson/ canal-json decoder — shared by all transports;
 │                    testdata/ holds fixtures captured from a real TiCDC
 ├── internal/testenv/ integration-tier containers: one Pulsar, one TiDB
-├── pulsar/          [planned] Pulsar EventSource adapter
+├── pulsar/          Pulsar EventSource adapter — the only package
+│                    that imports a Pulsar client
 └── test/cdcstack/   full TiDB + TiCDC + Pulsar stack for running the library
                      locally against real CDC; also how fixtures are captured
 ```

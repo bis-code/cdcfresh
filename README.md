@@ -1,15 +1,59 @@
 # cdcfresh
 
+[![ci](https://github.com/bis-code/cdcfresh/actions/workflows/ci.yml/badge.svg)](https://github.com/bis-code/cdcfresh/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/bis-code/cdcfresh.svg)](https://pkg.go.dev/github.com/bis-code/cdcfresh)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 **CDC-powered freshness for derived tables in Go.**
 
 Keep rollup/lookup/read-model tables fresh without SQL triggers, stored
 procedures, or cron-scan waste: change-data-capture events are the doorbell,
 your own SQL is the recipe, cdcfresh is the orchestration in between.
 
-> Status: core loop implemented — see the package documentation on
-> [pkg.go.dev](https://pkg.go.dev/github.com/bis-code/cdcfresh) for the full
-> model and guarantees. The Pulsar source adapter is in progress; API may
-> still shift.
+> Status: v1 is feature-complete — core loop and the TiCDC-on-Pulsar source
+> adapter both land and are covered end to end against real infrastructure.
+> The API is not yet tagged, so it may still shift. Full model and guarantees
+> are in the [package documentation](https://pkg.go.dev/github.com/bis-code/cdcfresh).
+
+```go
+src, err := pulsar.Source(
+	"pulsar://localhost:6650",
+	[]string{"persistent://public/default/cdcfresh"},
+	pulsar.WithSubscription("device-totals"),
+)
+if err != nil {
+	return err
+}
+defer src.Close()
+
+r, err := cdcfresh.New(
+	cdcfresh.Source(src),
+
+	// Which derived-table scopes did this change dirty?
+	cdcfresh.Scope(func(ev cdcfresh.RowEvent) []cdcfresh.Key {
+		device, _ := ev.Data["device"].(string)
+		return []cdcfresh.Key{cdcfresh.Key(device)}
+	}),
+
+	// Recompute one scope from the source tables. Your SQL, and nothing
+	// from the event reaches it — the event only named the scope.
+	cdcfresh.Rebuild(func(ctx context.Context, k cdcfresh.Key) error {
+		_, err := db.ExecContext(ctx,
+			`REPLACE INTO device_totals (device, total)
+			 SELECT device, SUM(value) FROM readings WHERE device = ? GROUP BY device`,
+			string(k))
+		return err
+	}),
+
+	cdcfresh.Coalesce(5*time.Second),
+	cdcfresh.MaxWait(30*time.Second),
+	cdcfresh.Reconcile(time.Hour, allDevices),
+)
+if err != nil {
+	return err
+}
+return r.Run(ctx)
+```
 
 ## The pattern
 
@@ -68,9 +112,9 @@ cdcfresh/            root package — import "github.com/bis-code/cdcfresh"
 ├── backoff.go       retry delay
 ├── stats.go         atomic counters + Stats snapshot
 ├── internal/
-│   ├── canaljson/   [planned] canal-json decoder + fixtures from a real TiCDC
+│   ├── canaljson/   canal-json decoder + fixtures captured from a real TiCDC
 │   └── testenv/     integration-tier containers: one Pulsar, one TiDB
-├── pulsar/          [planned] Pulsar EventSource adapter
+├── pulsar/          Pulsar EventSource adapter (the only package with a client)
 └── test/cdcstack/   full TiDB + TiCDC + Pulsar stack for local development
 ```
 
@@ -88,6 +132,24 @@ make test-integration  # integration tier — needs Docker
 
 Integration tests start the containers they need and stop them again, so
 there is nothing to bring up first.
+
+## Observability
+
+`Stats()` returns a plain snapshot struct — no metrics client in the library,
+so it costs nothing and dictates nothing. Wire it to whatever you already run:
+
+```go
+// expvar, standard library
+expvar.Publish("cdcfresh", expvar.Func(func() any { return r.Stats() }))
+
+// Prometheus: set gauges from the same fields on scrape
+prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "cdcfresh_dirty_keys"},
+	func() float64 { return float64(r.Stats().DirtyKeys) })
+```
+
+`DirtyKeys` and `PoisonedKeys` are queue depth; `EventsReceived`,
+`EventsSkipped`, `RebuildsOK`, `RebuildsFailed` and `Reconciles` are counters;
+`LastEvent` and `LastRebuild` are timestamps for staleness alerting.
 
 ## Prior art / positioning
 

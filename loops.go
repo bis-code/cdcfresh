@@ -30,8 +30,10 @@ func (r *Refresher) receiveLoop(ctx context.Context) error {
 			for _, k := range keys {
 				r.dirty.mark(k, now)
 			}
-			r.stats.keysMarked.Add(uint64(len(keys)))
 			r.mu.Unlock()
+			// An atomic needs no help from the mutex, and the dirty-set lock
+			// is contended by every loop — keep it to what it actually guards.
+			r.stats.keysMarked.Add(uint64(len(keys)))
 			r.wake()
 		}
 		if ev.Ack != nil { // D6: ack after enqueue, never after rebuild
@@ -47,13 +49,18 @@ func (r *Refresher) scheduleLoop(ctx context.Context, work chan<- Key) {
 		now := time.Now()
 		var ready []Key
 		r.mu.Lock()
-		for {
+		// Pop at most one batch per worker. Draining everything marks every
+		// ready key in-flight while it queues for dispatch, which both
+		// inflates the set a shutdown surrenders and turns a burst's
+		// re-dirties into redundant re-entries.
+		for len(ready) < r.cfg.workers {
 			k, ok := r.dirty.pop(now)
 			if !ok {
 				break
 			}
 			ready = append(ready, k)
 		}
+		more := len(ready) == r.cfg.workers
 		wakeAt, hasWake := r.dirty.nextWake(now)
 		r.mu.Unlock()
 
@@ -63,6 +70,12 @@ func (r *Refresher) scheduleLoop(ctx context.Context, work chan<- Key) {
 			case <-ctx.Done():
 				return
 			}
+		}
+
+		// A full batch means there may be more ready right now; go back for
+		// it rather than sleeping on the timer.
+		if more {
+			continue
 		}
 
 		if !timer.Stop() {

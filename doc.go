@@ -18,7 +18,7 @@
 // Construct a Refresher with New and run it until ctx is cancelled:
 //
 //	refresher, err := cdcfresh.New(
-//		cdcfresh.Source(mySource), // an EventSource — e.g. a Pulsar adapter
+//		cdcfresh.Source(src), // an EventSource, e.g. from cdcfresh/pulsar
 //		cdcfresh.Scope(func(ev cdcfresh.RowEvent) []cdcfresh.Key {
 //			return []cdcfresh.Key{cdcfresh.Key(ev.Database + "." + ev.Table)}
 //		}),

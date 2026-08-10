@@ -61,8 +61,14 @@ func (d *dirtySet) pop(now time.Time) (Key, bool) {
 			continue
 		}
 		// In-place is safe: nothing outside dirtySet holds a reference to
-		// order, and pop returns immediately after this mutation.
-		d.order = append(d.order[:i], d.order[i+1:]...)
+		// order, and pop returns immediately after this mutation. The head
+		// is the overwhelmingly common case and reslicing it costs nothing —
+		// shifting instead would make draining a queue of N keys O(N²).
+		if i == 0 {
+			d.order = d.order[1:]
+		} else {
+			d.order = append(d.order[:i], d.order[i+1:]...)
+		}
 		st.inFlight = true
 		st.redirty = false
 		return k, true

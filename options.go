@@ -128,9 +128,9 @@ func MaxWait(d time.Duration) Option { return func(c *config) { c.maxWait = d } 
 func Workers(n int) Option { return func(c *config) { c.workers = n } }
 
 // Backoff sets the retry schedule after rebuild failures: base doubles per
-// consecutive failure, capped at max, jittered.
-func Backoff(base, max time.Duration) Option {
-	return func(c *config) { c.backoffBase, c.backoffCap = base, max }
+// consecutive failure, capped at maxDelay, jittered.
+func Backoff(base, maxDelay time.Duration) Option {
+	return func(c *config) { c.backoffBase, c.backoffCap = base, maxDelay }
 }
 
 // PoisonAfter quarantines a key after n consecutive rebuild failures; only

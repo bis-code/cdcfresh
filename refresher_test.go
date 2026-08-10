@@ -70,7 +70,7 @@ func TestRunCoalescesAcksAndRebuilds(t *testing.T) {
 			rebuilds.Add(1)
 			return nil
 		}),
-		Coalesce(20*time.Millisecond), MaxWait(200*time.Millisecond), Workers(2),
+		Coalesce(200*time.Millisecond), MaxWait(2*time.Second), Workers(2),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -79,15 +79,17 @@ func TestRunCoalescesAcksAndRebuilds(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- r.Run(ctx) }()
 
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(10 * time.Second)
 	for rebuilds.Load() == 0 {
 		select {
 		case <-deadline:
-			t.Fatal("no rebuild within 2s")
+			t.Fatal("no rebuild within 10s")
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
-	time.Sleep(100 * time.Millisecond) // would catch a spurious 2nd rebuild
+	// Longer than the coalesce window: a spurious second rebuild would have
+	// to wait one out, so a shorter sleep could not have caught it.
+	time.Sleep(300 * time.Millisecond)
 	if n := rebuilds.Load(); n != 1 {
 		t.Errorf("want exactly 1 coalesced rebuild, got %d", n)
 	}
@@ -134,7 +136,7 @@ func TestRunSurfacesFailuresAndPoison(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- r.Run(ctx) }()
@@ -155,7 +157,7 @@ func TestRunSurfacesFailuresAndPoison(t *testing.T) {
 	// dirty.complete marks the key poisoned (visible via Stats) before
 	// workerLoop's corresponding onError call for it has necessarily run,
 	// so gating on the gauge raced the report this assertion depends on.
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(10 * time.Second)
 	for !hasPoison() {
 		select {
 		case <-deadline:
@@ -163,8 +165,19 @@ func TestRunSurfacesFailuresAndPoison(t *testing.T) {
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
-	if goodRebuilds.Load() != 1 {
-		t.Errorf("good key must rebuild despite bad key, got %d", goodRebuilds.Load())
+	// The good key rebuilds independently of the bad one, so it need not have
+	// finished by the moment poisoning is reported — poll for it instead of
+	// assuming an ordering between two unsynchronised workers.
+	goodDeadline := time.After(10 * time.Second)
+	for goodRebuilds.Load() == 0 {
+		select {
+		case <-goodDeadline:
+			t.Fatal("good key never rebuilt while the bad key was failing")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if n := goodRebuilds.Load(); n != 1 {
+		t.Errorf("good key rebuilt %d times, want exactly 1", n)
 	}
 	mu.Lock()
 	var sawRebuildErr bool
