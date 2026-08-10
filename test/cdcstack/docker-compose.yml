@@ -1,7 +1,7 @@
-# Throwaway TiDB + TiCDC + Pulsar stack for developing and testing cdcfresh.
+# Full TiDB + TiCDC + Pulsar cluster, used only to re-capture canal-json
 # Nothing here is production shaped: single-node everything, no volumes, state
-# dies with the containers. See harness/README.md.
-name: cdcfresh-harness
+# dies with the containers. See test/cdcstack/README.md.
+name: cdcfresh-stack
 
 services:
   pd:

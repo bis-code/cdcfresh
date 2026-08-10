@@ -8,8 +8,8 @@ your own SQL is the recipe, cdcfresh is the orchestration in between.
 
 > Status: core loop implemented — see the package documentation on
 > [pkg.go.dev](https://pkg.go.dev/github.com/bis-code/cdcfresh) for the full
-> model and guarantees. Pulsar source adapter and test harness are in
-> progress; API may still shift.
+> model and guarantees. The Pulsar source adapter is in progress; API may
+> still shift.
 
 ## The pattern
 
@@ -54,7 +54,7 @@ affected scope from the source tables, so duplicates are harmless
 | Rebuild invocation with retry + backoff | Generating rebuild SQL |
 | Reconcile sweep scheduler | Managing schemas or migrations |
 | Lag/health counters via a `Stats()` snapshot | Serving reads, HTTP anything |
-| Throwaway harness: compose/testcontainers with TiDB + TiCDC + Pulsar | Multi-instance coordination (single consumer assumed; document failover subscription) |
+| Integration tests against real Pulsar and TiDB containers | Multi-instance coordination (single consumer assumed; document failover subscription) |
 
 ## Repository layout
 
@@ -68,21 +68,26 @@ cdcfresh/            root package — import "github.com/bis-code/cdcfresh"
 ├── backoff.go       retry delay
 ├── stats.go         atomic counters + Stats snapshot
 ├── internal/
-│   └── canaljson/   [planned] canal-json decoder — shared by all transports
+│   ├── canaljson/   [planned] canal-json decoder + fixtures from a real TiCDC
+│   └── testenv/     integration-tier containers: one Pulsar, one TiDB
 ├── pulsar/          [planned] Pulsar EventSource adapter
-└── harness/         [planned] TiDB + TiCDC + Pulsar stack for the dev loop and integration tests
+└── test/cdcstack/   full TiDB + TiCDC + Pulsar cluster — fixture capture only
 ```
 
-The root package is stdlib-only; each transport adapter keeps its client
-dependency in its own subdirectory.
+The root package links nothing outside the standard library, and CI proves it
+with `go list -deps .`. Adapters and tests take dependencies freely; none of
+them may become reachable from the root.
 
 ## Testing
 
 ```
 make test              # every tier
-make test-unit         # unit tier only
+make test-unit         # unit tier only — no Docker
 make test-integration  # integration tier — needs Docker
 ```
+
+Integration tests start the containers they need and stop them again, so
+there is nothing to bring up first.
 
 ## Prior art / positioning
 

@@ -15,7 +15,7 @@ construction.
 make test              # every tier — unit + integration
 make test-unit         # unit tier — no Docker required
 make test-race         # unit tier with the race detector
-make test-integration  # integration tier — needs Docker
+make test-integration  # integration tier — needs Docker (starts its own containers)
 make lint              # gofmt check + go vet
 ```
 
@@ -29,9 +29,9 @@ Things that will break the project if violated:
 - Root package imports **stdlib only** — the invariant is the *import graph*,
   not `go.mod`. CI enforces it with `go list -deps .`, which is the only check
   that stays honest: `go.mod` already carries a MySQL driver and a Pulsar
-  client for the harness and adapters, so counting `require` lines would fail
-  on a healthy tree and pass on a broken one.
-  Its corollary: adapters and the harness may take dependencies freely, but
+  client for the test environment and adapters, so counting `require` lines
+  would fail on a healthy tree and pass on a broken one.
+  Its corollary: adapters and tests may take dependencies freely, but
   nothing they import may become reachable from the root package.
 - `Rebuild` and `Scope` are user callbacks, **never invoked while holding
   the Refresher's mutex** — all dirty-set access happens under that mutex.
@@ -54,10 +54,29 @@ cdcfresh/            root package — import "github.com/bis-code/cdcfresh"
 ├── coalesce.go      dirty-set state machine (pure, explicit clock)
 ├── backoff.go       retry delay
 ├── stats.go         atomic counters + Stats snapshot
-├── internal/canaljson/ [planned] canal-json decoder — shared by all transports
+├── internal/canaljson/ [planned] canal-json decoder — shared by all transports;
+│                    testdata/ holds fixtures captured from a real TiCDC
+├── internal/testenv/ integration-tier containers: one Pulsar, one TiDB
 ├── pulsar/          [planned] Pulsar EventSource adapter
-└── harness/         [planned] TiDB + TiCDC + Pulsar stack for the dev loop and integration tests
+└── test/cdcstack/   full TiDB + TiCDC + Pulsar cluster — fixture capture only,
+                     no test depends on it
 ```
+
+## Testing tiers
+
+Two, split by what they prove:
+
+- **Unit** (`go test ./...`) — no Docker. Includes the fixture-shape check in
+  `internal/canaljson`.
+- **Integration** (`-tags=integration`) — each test starts the containers it
+  needs through `internal/testenv` and tears them down after. There is no stack
+  to bring up first, so a skipped tier cannot masquerade as a passing one.
+
+The integration tier deliberately does *not* run TiCDC. cdcfresh consumes bytes
+from a topic and cannot tell a live changefeed from a replay, so tests publish
+the committed canal-json fixtures instead of spending minutes regenerating
+payloads that already exist. `test/cdcstack` is how those fixtures get
+recaptured, by hand, when a TiDB release might have moved the wire format.
 
 `docs/superpowers/` and `.superpowers/` are gitignored working artifacts —
 they never get committed.
@@ -91,6 +110,6 @@ drive-by change.
 
 ## Before pushing
 
-Unit tier and lint must be green. CI runs the fast tier (gofmt, vet, unit
-tests) on every push and pull request; the integration tier runs nightly and
-on manual dispatch.
+Unit tier and lint must be green. CI runs both tiers on every push and pull
+request — the integration tier starts its own containers, so it needs no
+scheduled job and no stack maintained for it.
