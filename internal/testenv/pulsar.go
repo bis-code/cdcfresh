@@ -22,6 +22,10 @@ const (
 	pulsarImage       = "apachepulsar/pulsar:4.2.4"
 	pulsarServicePort = "6650/tcp"
 	pulsarAdminPort   = "8080/tcp"
+
+	// The namespace every topic in these tests lives in; the broker creates
+	// it during startup, after registering itself as a cluster.
+	namespace = "public/default"
 )
 
 // Pulsar is a running broker and a client connected to it.
@@ -46,20 +50,25 @@ func StartPulsar(t *testing.T) *Pulsar {
 		Env: map[string]string{
 			"PULSAR_MEM": "-Xms256m -Xmx256m -XX:MaxDirectMemorySize=256m",
 		},
-		// Both listening ports and the "messaging service is ready" log show
-		// up seconds before the standalone cluster's metadata exists, and a
-		// producer created in that window fails with TopicNotFound. The admin
-		// API naming the cluster is the first signal the namespace can
-		// actually be used.
-		WaitingFor: wait.ForAll(
-			wait.ForListeningPort(pulsarServicePort),
-			wait.ForHTTP("/admin/v2/clusters").
-				WithPort(pulsarAdminPort).
-				WithResponseMatcher(func(r io.Reader) bool {
-					body, err := io.ReadAll(r)
-					return err == nil && strings.TrimSpace(string(body)) == `["standalone"]`
-				}),
-		).WithDeadline(2 * time.Minute),
+		// Readiness took three attempts to get right, so the measurements are
+		// worth recording. Against a cold broker:
+		//
+		//	port 6650 open          0.0s   <- Docker's proxy, not the broker
+		//	/admin/v2/clusters     11.05s
+		//	public/default          11.18s  <- what a producer actually needs
+		//
+		// ForListeningPort is therefore worthless here: the published port
+		// answers before anything is behind it. The cluster endpoint looks
+		// right but lands 130ms early, and a producer created in that window
+		// fails with TopicNotFound — narrow enough to always pass locally and
+		// still lose on CI. Topics live in the namespace, so wait for that.
+		WaitingFor: wait.ForHTTP("/admin/v2/namespaces/public").
+			WithPort(pulsarAdminPort).
+			WithResponseMatcher(func(r io.Reader) bool {
+				body, err := io.ReadAll(r)
+				return err == nil && strings.Contains(string(body), namespace)
+			}).
+			WithStartupTimeout(2 * time.Minute),
 	}
 
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
@@ -99,9 +108,25 @@ func StartPulsar(t *testing.T) *Pulsar {
 // persisted so a subsequent consumer cannot race ahead of them.
 func (p *Pulsar) Produce(t *testing.T, topic string, payloads ...[]byte) {
 	t.Helper()
-	producer, err := p.Client.CreateProducer(pulsar.ProducerOptions{Topic: topic})
+
+	// The readiness probe above closes the window this guards, but only by
+	// about 130ms on the machine it was measured on. Auto topic creation is
+	// the first thing to touch a freshly-created namespace, so give it a few
+	// attempts rather than turning a slow CI runner into a red build.
+	var producer pulsar.Producer
+	var err error
+	for attempt := range 10 {
+		producer, err = p.Client.CreateProducer(pulsar.ProducerOptions{Topic: topic})
+		if err == nil {
+			break
+		}
+		if attempt == 0 {
+			t.Logf("create producer on %s: %v — retrying", topic, err)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 	if err != nil {
-		t.Fatalf("create producer on %s: %v", topic, err)
+		t.Fatalf("create producer on %s after retries: %v", topic, err)
 	}
 	defer producer.Close()
 
