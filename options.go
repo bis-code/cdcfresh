@@ -25,44 +25,71 @@ type config struct {
 	enumerate      EnumerateFunc
 }
 
+// optionName is the user-facing name of an Option, used in validation
+// errors. A named type keeps validate() from accumulating bare strings that
+// drift when an Option is renamed.
+type optionName string
+
+const (
+	optSource      optionName = "Source"
+	optScope       optionName = "Scope"
+	optRebuild     optionName = "Rebuild"
+	optWorkers     optionName = "Workers"
+	optCoalesce    optionName = "Coalesce"
+	optMaxWait     optionName = "MaxWait"
+	optBackoff     optionName = "Backoff"
+	optPoisonAfter optionName = "PoisonAfter"
+	optReconcile   optionName = "Reconcile"
+)
+
+// joinOptionNames renders names as a comma-separated list; strings.Join
+// won't take a []optionName directly.
+func joinOptionNames(names []optionName) string {
+	strs := make([]string, len(names))
+	for i, n := range names {
+		strs[i] = string(n)
+	}
+	return strings.Join(strs, ", ")
+}
+
 // validate reports every missing required option, and every option given
 // an invalid value, in one error.
 func (c *config) validate() error {
-	var missing []string
+	var missing []optionName
 	if c.source == nil {
-		missing = append(missing, "Source")
+		missing = append(missing, optSource)
 	}
 	if c.scope == nil {
-		missing = append(missing, "Scope")
+		missing = append(missing, optScope)
 	}
 	if c.rebuild == nil {
-		missing = append(missing, "Rebuild")
+		missing = append(missing, optRebuild)
 	}
-	var invalid []string
+	var invalid []optionName
 	if c.workers < 1 {
-		invalid = append(invalid, "Workers")
+		invalid = append(invalid, optWorkers)
 	}
 	if c.coalesce < 0 {
-		invalid = append(invalid, "Coalesce")
+		invalid = append(invalid, optCoalesce)
 	}
 	if c.maxWait < 0 {
-		invalid = append(invalid, "MaxWait")
+		invalid = append(invalid, optMaxWait)
 	}
 	if c.backoffBase < 0 || c.backoffCap < 0 {
-		invalid = append(invalid, "Backoff")
+		invalid = append(invalid, optBackoff)
 	}
 	if c.poisonAfter < 1 {
-		invalid = append(invalid, "PoisonAfter")
+		invalid = append(invalid, optPoisonAfter)
 	}
 	if c.enumerate != nil && c.reconcileEvery <= 0 {
-		invalid = append(invalid, "Reconcile")
+		invalid = append(invalid, optReconcile)
 	}
 	var problems []string
 	if len(missing) > 0 {
-		problems = append(problems, fmt.Sprintf("missing required options: %s", strings.Join(missing, ", ")))
+		problems = append(problems, fmt.Sprintf("missing required options: %s", joinOptionNames(missing)))
 	}
 	if len(invalid) > 0 {
-		problems = append(problems, fmt.Sprintf("invalid option values: %s", strings.Join(invalid, ", ")))
+		problems = append(problems, fmt.Sprintf("invalid option values: %s", joinOptionNames(invalid)))
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("cdcfresh: %s", strings.Join(problems, "; "))
