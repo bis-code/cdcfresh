@@ -84,6 +84,14 @@ What the captured samples show, and what the decoder therefore has to handle:
 **TiKV or TiDB restarting.** The cluster needs a few GB of memory; check
 Docker's memory allocation before suspecting the config.
 
+**TiKV exits one second after start.** It refuses to boot below ~123k open
+files (`the maximum number of open file descriptors is too small`), which the
+compose file raises explicitly. Docker Desktop is generous by default and Linux
+CI runners cap at 65536, so removing that `ulimits` block breaks CI while
+looking fine locally. Everything downstream then waits on a dead cluster, so
+check `docker compose ps` for an exited container before reading timeouts as
+slowness.
+
 **Changefeed exists but nothing arrives on the topic.** Check its state with
 `docker compose -f harness/docker-compose.yml exec -T ticdc /cdc cli changefeed
 query --server=http://127.0.0.1:8300 --changefeed-id=cdcfresh`. A changefeed

@@ -5,16 +5,19 @@
 // out of Pulsar as canal-json — which is the foundation every later
 // integration test builds on.
 //
-// It deliberately talks to Pulsar over the admin REST API rather than a Pulsar
-// client library: the client dependency belongs to the adapter package, not to
-// the harness.
+// It reads Pulsar through the same client the adapter will use, subscribing
+// before the write and acknowledging what it receives. The admin REST API
+// could report a message count more cheaply, but counting messages an operator
+// endpoint can see is not evidence that a consumer can subscribe, decode and
+// ack one, and acking is the exact mechanism cdcfresh's delivery guarantee
+// rests on.
 package harness
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -22,89 +25,83 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/pulsar-client-go/pulsar"
+	plog "github.com/apache/pulsar-client-go/pulsar/log"
 	_ "github.com/go-sql-driver/mysql"
 )
 
 const (
-	tidbDSN     = "root@tcp(127.0.0.1:4000)/"
-	tidbStatus  = "http://127.0.0.1:10080/status"
-	pulsarAdmin = "http://127.0.0.1:8080"
-	topic       = "persistent://public/default/cdcfresh"
-	topicPath   = "public/default/cdcfresh"
+	tidbDSN    = "root@tcp(127.0.0.1:4000)/"
+	tidbStatus = "http://127.0.0.1:10080/status"
+	pulsarURL  = "pulsar://127.0.0.1:6650"
+	topic      = "persistent://public/default/cdcfresh"
+
+	// TiCDC batches before it flushes, so a row is not on the topic instantly.
+	deliveryTimeout = 60 * time.Second
 )
 
-// requireHarness fails — rather than skips — when the stack is unreachable. A
-// skip here would make an unrun integration tier look identical to a passing
-// one, which is the failure mode this tier exists to prevent.
-func requireHarness(t *testing.T) {
-	t.Helper()
-	for _, probe := range []struct{ name, url string }{
-		{"TiDB", tidbStatus},
-		{"Pulsar", pulsarAdmin + "/admin/v2/brokers/health"},
-	} {
-		resp, err := http.Get(probe.url)
-		if err != nil {
-			t.Fatalf("%s unreachable at %s (%v)\nrun `make harness-up` first", probe.name, probe.url, err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("%s unhealthy at %s (status %d)\nrun `make harness-up` first", probe.name, probe.url, resp.StatusCode)
-		}
-	}
-}
+const hint = "\nrun `make harness-up` first"
 
-func msgCount(t *testing.T) float64 {
+// requireTiDB opens TiDB, failing — rather than skipping — when it is
+// unreachable. A skip here would make an unrun integration tier look identical
+// to a passing one, which is the failure mode this tier exists to prevent.
+func requireTiDB(t *testing.T) *sql.DB {
 	t.Helper()
-	resp, err := http.Get(fmt.Sprintf("%s/admin/v2/persistent/%s/stats", pulsarAdmin, topicPath))
+	resp, err := http.Get(tidbStatus)
 	if err != nil {
-		t.Fatalf("topic stats: %v", err)
+		t.Fatalf("TiDB unreachable at %s (%v)%s", tidbStatus, err, hint)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("topic stats: status %d (is the changefeed created? run `make harness-up`)", resp.StatusCode)
-	}
-	var stats struct {
-		MsgInCounter float64 `json:"msgInCounter"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
-		t.Fatalf("decode topic stats: %v", err)
-	}
-	return stats.MsgInCounter
-}
-
-// newestMessage returns the body of the most recent message on the topic.
-func newestMessage(t *testing.T) string {
-	t.Helper()
-	u := fmt.Sprintf("%s/admin/v2/persistent/%s/examinemessage?initialPosition=latest&messagePosition=1",
-		pulsarAdmin, topicPath)
-	resp, err := http.Get(u)
-	if err != nil {
-		t.Fatalf("examine message: %v", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read message body: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("examine message: status %d: %s", resp.StatusCode, body)
-	}
-	return string(body)
-}
-
-// TestHarnessDeliversCanalJSON writes a row to TiDB and asserts it comes out of
-// Pulsar as canal-json naming that table.
-func TestHarnessDeliversCanalJSON(t *testing.T) {
-	requireHarness(t)
+	resp.Body.Close()
 
 	db, err := sql.Open("mysql", tidbDSN)
 	if err != nil {
 		t.Fatalf("open tidb: %v", err)
 	}
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 	if err := db.Ping(); err != nil {
-		t.Fatalf("ping tidb: %v\nrun `make harness-up` first", err)
+		t.Fatalf("ping tidb: %v%s", err, hint)
 	}
+	return db
+}
+
+// subscribe returns a consumer positioned at the end of the topic, so it sees
+// only what is produced after this call and leftovers from earlier runs cannot
+// satisfy the assertion. The subscription name is unique per run: a shared one
+// would carry its cursor across runs and turn every re-run into a replay.
+func subscribe(t *testing.T) pulsar.Consumer {
+	t.Helper()
+	client, err := pulsar.NewClient(pulsar.ClientOptions{
+		URL:               pulsarURL,
+		ConnectionTimeout: 10 * time.Second,
+		OperationTimeout:  30 * time.Second,
+		Logger:            plog.DefaultNopLogger(),
+	})
+	if err != nil {
+		t.Fatalf("pulsar client at %s: %v%s", pulsarURL, err, hint)
+	}
+	t.Cleanup(client.Close)
+
+	consumer, err := client.Subscribe(pulsar.ConsumerOptions{
+		Topic:                       topic,
+		SubscriptionName:            fmt.Sprintf("harness-%d", time.Now().UnixNano()),
+		Type:                        pulsar.Exclusive,
+		SubscriptionInitialPosition: pulsar.SubscriptionPositionLatest,
+	})
+	if err != nil {
+		t.Fatalf("subscribe to %s: %v%s", topic, err, hint)
+	}
+	t.Cleanup(func() {
+		consumer.Unsubscribe()
+		consumer.Close()
+	})
+	return consumer
+}
+
+// TestHarnessDeliversCanalJSON writes a row to TiDB and asserts a Pulsar
+// consumer receives it as canal-json naming that table.
+func TestHarnessDeliversCanalJSON(t *testing.T) {
+	db := requireTiDB(t)
+	consumer := subscribe(t)
 
 	// A per-run table keeps repeat runs independent.
 	table := fmt.Sprintf("smoke_%d", time.Now().UnixNano())
@@ -118,27 +115,54 @@ func TestHarnessDeliversCanalJSON(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS demo.%s", table)) })
 
-	before := msgCount(t)
 	if _, err := db.Exec(fmt.Sprintf("INSERT INTO demo.%s VALUES (1, 'dev-a', 10)", table)); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
-	// TiCDC batches before it flushes, so the message is not instant.
-	deadline := time.Now().Add(60 * time.Second)
-	for msgCount(t) <= before {
-		if time.Now().After(deadline) {
-			t.Fatalf("no new message on %s within 60s of the insert (msgInCounter stuck at %v)", topic, before)
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), deliveryTimeout)
+	defer cancel()
 
-	msg := newestMessage(t)
-	if !strings.Contains(msg, table) {
-		t.Errorf("newest message does not mention table %q:\n%s", table, msg)
+	// The changefeed covers the whole cluster, so this topic also carries DDL
+	// and other tables' rows. Match on the decoded fields rather than a
+	// substring: the CREATE TABLE statement above names the table too, and a
+	// substring check happily accepts that DDL as proof the row arrived.
+	for {
+		msg, err := consumer.Receive(ctx)
+		if err != nil {
+			t.Fatalf("no INSERT on demo.%s within %s of the insert: %v", table, deliveryTimeout, err)
+		}
+		payload := msg.Payload()
+		if err := consumer.Ack(msg); err != nil {
+			t.Fatalf("ack: %v", err)
+		}
+
+		var ev canalEvent
+		if err := json.Unmarshal(payload, &ev); err != nil {
+			t.Fatalf("message is not canal-json: %v\n%s", err, payload)
+		}
+		if ev.IsDdl || ev.Table != table || !strings.EqualFold(ev.Type, "insert") {
+			continue
+		}
+		if len(ev.Data) != 1 {
+			t.Fatalf("want 1 row in data, got %d:\n%s", len(ev.Data), payload)
+		}
+		if got := ev.Data[0]["device"]; got != "dev-a" {
+			t.Errorf("device = %q, want %q:\n%s", got, "dev-a", payload)
+		}
+		t.Logf("received and acked: %s", payload)
+		return
 	}
-	if !strings.Contains(msg, `"isDdl"`) {
-		t.Errorf("newest message is not canal-json (no isDdl field):\n%s", msg)
-	}
+}
+
+// canalEvent is the subset of the canal-json envelope these tests assert on.
+// The decoder in issue #3 owns the full shape; this stays deliberately small.
+type canalEvent struct {
+	Database string              `json:"database"`
+	Table    string              `json:"table"`
+	Type     string              `json:"type"`
+	IsDdl    bool                `json:"isDdl"`
+	PKNames  []string            `json:"pkNames"`
+	Data     []map[string]string `json:"data"`
 }
 
 // TestGoldenFilesAreRealCanalJSON guards the captured fixtures: they must stay
@@ -147,14 +171,7 @@ func TestGoldenFilesAreRealCanalJSON(t *testing.T) {
 	for _, name := range []string{"insert", "update", "delete"} {
 		t.Run(name, func(t *testing.T) {
 			raw := readGolden(t, name)
-			var ev struct {
-				Database string              `json:"database"`
-				Table    string              `json:"table"`
-				Type     string              `json:"type"`
-				IsDdl    bool                `json:"isDdl"`
-				PKNames  []string            `json:"pkNames"`
-				Data     []map[string]string `json:"data"`
-			}
+			var ev canalEvent
 			if err := json.Unmarshal(raw, &ev); err != nil {
 				t.Fatalf("golden %s.json is not valid canal-json: %v", name, err)
 			}
@@ -167,7 +184,7 @@ func TestGoldenFilesAreRealCanalJSON(t *testing.T) {
 			if len(ev.Data) == 0 {
 				t.Errorf("data is empty — canal-json carries rows as an array, decoder must fan out")
 			}
-			if strings.ToUpper(ev.Type) != strings.ToUpper(name) {
+			if !strings.EqualFold(ev.Type, name) {
 				t.Errorf("type = %q, want %q", ev.Type, name)
 			}
 		})

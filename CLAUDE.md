@@ -26,9 +26,13 @@ behind the `integration` build tag and are skipped by an untagged build.
 
 Things that will break the project if violated:
 
-- Root package imports **stdlib only**. A transport adapter (e.g. `pulsar/`)
-  keeps its client dependency in its own subdirectory — never add a
-  `require` to the root module for an adapter's sake.
+- Root package imports **stdlib only** — the invariant is the *import graph*,
+  not `go.mod`. CI enforces it with `go list -deps .`, which is the only check
+  that stays honest: `go.mod` already carries a MySQL driver and a Pulsar
+  client for the harness and adapters, so counting `require` lines would fail
+  on a healthy tree and pass on a broken one.
+  Its corollary: adapters and the harness may take dependencies freely, but
+  nothing they import may become reachable from the root package.
 - `Rebuild` and `Scope` are user callbacks, **never invoked while holding
   the Refresher's mutex** — all dirty-set access happens under that mutex.
 - Events are doorbells: **no decoded event value may reach user SQL.**
