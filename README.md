@@ -28,23 +28,6 @@ The events are only a doorbell, never the data: rebuilds always recompute the
 affected scope from the source tables, so duplicates are harmless
 (at-least-once friendly) and drift is impossible by construction.
 
-## Sketch (target API)
-
-```go
-refresher := cdcfresh.New(
-    cdcfresh.FromPulsar(client, "cdc-changes", cdcfresh.CanalJSON()), // TiCDC → Pulsar sink
-    cdcfresh.Scope(func(ev cdcfresh.RowEvent) []cdcfresh.Key {
-        // row event → which derived-table scopes are now dirty
-    }),
-    cdcfresh.Coalesce(5*time.Second),              // 100 changes to one scope = 1 rebuild
-    cdcfresh.Rebuild(func(ctx context.Context, k cdcfresh.Key) error {
-        // run YOUR set-based rebuild SQL, limited to scope k
-    }),
-    cdcfresh.Reconcile(6*time.Hour),               // periodic full rebuild heals anything missed
-)
-refresher.Run(ctx)
-```
-
 ## Design principles
 
 - **Ephemeral / stateless** — cdcfresh owns no durable state. The dirty-scope
@@ -70,7 +53,7 @@ refresher.Run(ctx)
 | Scope extraction, per-key coalescing/debounce | Exactly-once guarantees |
 | Rebuild invocation with retry + backoff | Generating rebuild SQL |
 | Reconcile sweep scheduler | Managing schemas or migrations |
-| Lag/health counters (expvar or prometheus) | Serving reads, HTTP anything |
+| Lag/health counters via a `Stats()` snapshot | Serving reads, HTTP anything |
 | Throwaway harness: compose/testcontainers with TiDB + TiCDC + Pulsar | Multi-instance coordination (single consumer assumed; document failover subscription) |
 
 ## Repository layout
@@ -112,4 +95,4 @@ make test-integration  # integration tier — needs Docker
 
 ## License
 
-MIT (intended; added with first real code).
+MIT — see [LICENSE](LICENSE).

@@ -16,7 +16,7 @@ make test              # every tier — unit + integration
 make test-unit         # unit tier — no Docker required
 make test-race         # unit tier with the race detector
 make test-integration  # integration tier — needs Docker
-make lint               # gofmt check + go vet
+make lint              # gofmt check + go vet
 ```
 
 `go test ./...` (no build tag) is the unit tier: integration tests live
