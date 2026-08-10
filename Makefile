@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := test
 
-.PHONY: test test-race test-integration test-all lint check help
+.PHONY: test test-race test-integration test-all lint help
 
 test: ## unit tier — fakes only, no Docker, sub-second (go test ./...)
 	go test ./...
@@ -31,8 +31,6 @@ lint: ## gofmt check (fails if it reports files) + go vet
 		exit 1; \
 	fi
 	go vet ./...
-
-check: lint test-race ## what the fast CI job runs: lint + race-tested unit tier
 
 help: ## list targets with descriptions
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-18s %s\n", $$1, $$2}'
