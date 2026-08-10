@@ -1,0 +1,1 @@
+{"id":0,"database":"demo","table":"readings","pkNames":null,"isDdl":true,"type":"CREATE","es":1786358942713,"ts":1786358943021,"sql":"CREATE TABLE IF NOT EXISTS `demo`.`readings` (`id` INT PRIMARY KEY,`device` VARCHAR(64),`value` INT)","sqlType":null,"mysqlType":null,"data":null,"old":null}

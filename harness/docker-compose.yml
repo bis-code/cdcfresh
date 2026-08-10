@@ -1,0 +1,57 @@
+# Throwaway TiDB + TiCDC + Pulsar stack for developing and testing cdcfresh.
+# Nothing here is production shaped: single-node everything, no volumes, state
+# dies with the containers. See harness/README.md.
+name: cdcfresh-harness
+
+services:
+  pd:
+    image: pingcap/pd:v8.5.7
+    command:
+      - --name=pd
+      - --data-dir=/tmp/pd
+      - --client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://pd:2379
+      - --peer-urls=http://0.0.0.0:2380
+      - --advertise-peer-urls=http://pd:2380
+      - --initial-cluster=pd=http://pd:2380
+
+  tikv:
+    image: pingcap/tikv:v8.5.7
+    command:
+      - --addr=0.0.0.0:20160
+      - --advertise-addr=tikv:20160
+      - --data-dir=/tmp/tikv
+      - --pd=pd:2379
+    depends_on: [pd]
+
+  tidb:
+    image: pingcap/tidb:v8.5.7
+    command:
+      - --store=tikv
+      - --path=pd:2379
+      - --advertise-address=tidb
+    ports:
+      - "4000:4000"   # mysql protocol
+      - "10080:10080" # status/health endpoint, used for readiness
+    depends_on: [tikv]
+
+  ticdc:
+    image: pingcap/ticdc:v8.5.7
+    command:
+      - /cdc
+      - server
+      - --addr=0.0.0.0:8300
+      - --advertise-addr=ticdc:8300
+      - --pd=http://pd:2379
+    ports:
+      - "8300:8300"
+    depends_on: [tidb]
+
+  pulsar:
+    image: apachepulsar/pulsar:4.2.4
+    # -nfw/-nss drop the functions worker and stream storage: neither is used
+    # here and both add startup time.
+    command: bin/pulsar standalone -nfw -nss
+    ports:
+      - "6650:6650"
+      - "8080:8080"

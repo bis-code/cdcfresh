@@ -1,0 +1,1 @@
+{"id":0,"database":"demo","table":"readings","pkNames":["id"],"isDdl":false,"type":"INSERT","es":1786358942713,"ts":1786358944991,"sql":"","sqlType":{"id":4,"device":12,"value":4},"mysqlType":{"id":"int","device":"varchar","value":"int"},"old":null,"data":[{"id":"1","device":"dev-a","value":"10"}]}

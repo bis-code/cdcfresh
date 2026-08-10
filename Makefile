@@ -1,6 +1,8 @@
 .DEFAULT_GOAL := test
 
-.PHONY: test test-unit test-race test-integration lint help
+.PHONY: test test-unit test-race test-integration harness-up harness-down lint help
+
+COMPOSE := docker compose -f harness/docker-compose.yml
 
 test: ## every tier — unit + integration
 	go test -tags=integration ./...
@@ -22,6 +24,13 @@ test-integration: ## integration tier — packages that only build under -tags=i
 		exit 0; \
 	fi; \
 	go test -tags=integration $$only
+
+harness-up: ## start the TiDB + TiCDC + Pulsar stack and create the changefeed
+	$(COMPOSE) up -d
+	./harness/bootstrap.sh
+
+harness-down: ## stop the harness stack and delete its state
+	$(COMPOSE) down -v
 
 lint: ## gofmt check (fails if it reports files) + go vet
 	@fmt_out=$$(gofmt -l .); \
