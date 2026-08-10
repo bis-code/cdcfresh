@@ -6,8 +6,10 @@ Keep rollup/lookup/read-model tables fresh without SQL triggers, stored
 procedures, or cron-scan waste: change-data-capture events are the doorbell,
 your own SQL is the recipe, cdcfresh is the orchestration in between.
 
-> Status: core loop implemented (design record: `docs/design.md`). Pulsar
-> source adapter and test harness are in progress; API may still shift.
+> Status: core loop implemented — see the package documentation on
+> [pkg.go.dev](https://pkg.go.dev/github.com/bis-code/cdcfresh) for the full
+> model and guarantees. Pulsar source adapter and test harness are in
+> progress; API may still shift.
 
 ## The pattern
 
