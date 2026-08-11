@@ -250,11 +250,22 @@ func TestBacklogIsDrainedOnFirstSubscribe(t *testing.T) {
 	}
 }
 
-// TestSustainedLoadCoalesces measures the library's whole value: many changes
-// to few scopes must become few rebuilds. The bound is deliberately loose —
-// the exact ratio moves with timing, and pinning it would manufacture a flake.
-// What matters is catching a collapse to one-rebuild-per-event.
-func TestSustainedLoadCoalesces(t *testing.T) {
+// TestBurstOfChangesCollapsesToOneRebuildPerScope measures the library's
+// whole value: many changes to few scopes must become few rebuilds. 500
+// changes across five scopes, produced back-to-back with no gaps, collapse
+// to one rebuild per scope — the debounce chain for each scope keeps
+// resetting until production ends, so the whole burst lands inside a single
+// coalesce window per key.
+//
+// What this does NOT exercise: multi-window behaviour. Production is
+// round-robin across devices with no delay, so same-device messages arrive
+// far under the Coalesce window for the entire run; MaxWait never fires.
+// Proving that a debounce chain eventually flushes mid-burst — the case
+// MaxWait exists for — needs spaced-out production and is a different test.
+// The bound here is deliberately loose — the exact ratio moves with timing,
+// and pinning it would manufacture a flake. What matters is catching a
+// collapse to one-rebuild-per-event.
+func TestBurstOfChangesCollapsesToOneRebuildPerScope(t *testing.T) {
 	p := testenv.SharedPulsar(t)
 	topic := p.Topic(t)
 	devices := []string{"dev-a", "dev-b", "dev-c", "dev-d", "dev-e"}
