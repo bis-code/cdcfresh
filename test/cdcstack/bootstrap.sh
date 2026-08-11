@@ -56,7 +56,7 @@ docker compose exec -T ticdc /cdc cli changefeed list --server=http://127.0.0.1:
 
 cat <<EOF
 
-stack ready — capture fixtures, then: make cdcstack-down
+stack ready — when finished: make infra-down
   TiDB    mysql://root@127.0.0.1:4000/
   TiCDC   http://127.0.0.1:8300
   Pulsar  pulsar://127.0.0.1:6650  (admin http://127.0.0.1:8080)

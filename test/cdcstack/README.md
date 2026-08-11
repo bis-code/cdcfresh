@@ -14,7 +14,7 @@ pipeline in front of you, not to run the suite.
 ## Bring it up
 
 ```
-make cdcstack-up
+make infra-up
 ```
 
 That starts the cluster and runs `bootstrap.sh`, which waits for TiDB, TiCDC
@@ -53,7 +53,7 @@ docker compose -f test/cdcstack/docker-compose.yml exec -T pulsar \
 Save one message per event type into `internal/canaljson/testdata/`, named for
 what it is (`insert.json`, `update.json`, `delete.json`, `ddl_create.json`,
 `ddl_query.json`). Strip nothing: the decoder must tolerate the payload exactly
-as TiCDC emits it. `make cdcstack-down` tears the stack down.
+as TiCDC emits it. `make infra-down` tears the stack down.
 
 What the captured samples show, and what the decoder therefore has to handle:
 

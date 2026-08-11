@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := test
 
-.PHONY: test test-unit test-race test-integration cdcstack-up cdcstack-down lint help
+.PHONY: test test-unit test-race test-integration infra-up infra-down lint help
 
 COMPOSE := docker compose -f test/cdcstack/docker-compose.yml
 
@@ -25,15 +25,15 @@ test-integration: ## integration tier — packages that only build under -tags=i
 	fi; \
 	go test -tags=integration $$only
 
-# The full TiDB + TiCDC + Pulsar stack exists only to re-capture canal-json
-# fixtures when a TiDB release might have changed the wire format. No test
-# needs it: the integration tier starts its own containers. See
+# The local development stack: the whole pipeline, for running cdcfresh
+# against real change data by hand, and for re-capturing canal-json fixtures.
+# No test needs it — the integration tier starts its own containers. See
 # test/cdcstack/README.md.
-cdcstack-up: ## start the full CDC stack (fixture capture only — not needed for tests)
+infra-up: ## start the full TiDB + TiCDC + Pulsar stack locally (not needed for tests)
 	$(COMPOSE) up -d
 	./test/cdcstack/bootstrap.sh
 
-cdcstack-down: ## stop the full CDC stack and delete its state
+infra-down: ## stop the local stack and delete its state
 	$(COMPOSE) down -v
 
 lint: ## gofmt check (fails if it reports files) + go vet, including tagged code
