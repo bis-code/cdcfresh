@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -399,5 +400,76 @@ func TestBurstOfChangesCollapsesToOneRebuildPerScope(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
 		t.Errorf("Run: %v", err)
+	}
+}
+
+// TestShutdownMidRebuildReturnsCleanly cancels while a rebuild is in flight.
+// Run must return promptly, and the surrendered rebuild must not be reported
+// as a failure: a shutdown is not an error, and emitting one would page
+// somebody every deploy.
+//
+// This asserts return rather than the absence of leaked goroutines. Run's own
+// WaitGroup gates its return on every loop having exited, so returning is the
+// same property; detecting leaks directly would mean adding goleak for one
+// assertion.
+func TestShutdownMidRebuildReturnsCleanly(t *testing.T) {
+	p := testenv.SharedPulsar(t)
+	topic := p.Topic(t)
+
+	p.Produce(t, topic, canalInsert("dev-a"))
+
+	src, err := pulsar.Source(p.URL, []string{topic}, pulsar.WithSubscription("shutdown"))
+	if err != nil {
+		t.Fatalf("Source: %v", err)
+	}
+	defer src.Close()
+
+	var mu sync.Mutex
+	var errsSeen []string
+	entered := make(chan struct{})
+	var once sync.Once
+
+	r, err := cdcfresh.New(
+		cdcfresh.Source(src),
+		cdcfresh.Scope(deviceScope),
+		cdcfresh.Rebuild(func(ctx context.Context, _ cdcfresh.Key) error {
+			once.Do(func() { close(entered) })
+			<-ctx.Done() // still running when the shutdown lands
+			return ctx.Err()
+		}),
+		cdcfresh.Coalesce(20*time.Millisecond),
+		cdcfresh.MaxWait(200*time.Millisecond),
+		cdcfresh.OnError(func(err error) {
+			mu.Lock()
+			defer mu.Unlock()
+			errsSeen = append(errsSeen, err.Error())
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	<-entered
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Run returned %v, want context.Canceled", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Run did not return within 30s of cancellation")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, e := range errsSeen {
+		if strings.Contains(e, "rebuild") || strings.Contains(e, "poisoned") {
+			t.Errorf("shutdown reported %q; a surrendered rebuild is not a failure", e)
+		}
 	}
 }
