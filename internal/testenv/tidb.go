@@ -6,7 +6,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/testcontainers/testcontainers-go"
@@ -24,20 +26,58 @@ const (
 	tidbImage      = "pingcap/tidb:v8.5.7"
 	tidbPort       = "4000/tcp"
 	tidbStatusPort = "10080/tcp"
-	tidbDSNFmt     = "root@tcp(%s:%s)/test?parseTime=true&loc=UTC"
 )
 
-// TiDB is a running database and an open connection to it.
+var (
+	tidbOnce sync.Once
+	tidbInst *TiDB
+	tidbErr  error
+)
+
+// TiDB is a running database. Use Schema for a handle scoped to one test.
 type TiDB struct {
-	DSN string
-	DB  *sql.DB
+	DSN  string
+	DB   *sql.DB
+	addr string // host:port, for building per-schema DSNs
 }
 
-// StartTiDB brings up a database for the duration of the test.
-func StartTiDB(t *testing.T) *TiDB {
+// SharedTiDB returns a database started once for this test binary. See
+// SharedPulsar for why it registers no cleanup.
+func SharedTiDB(t *testing.T) *TiDB {
 	t.Helper()
-	ctx := context.Background()
+	tidbOnce.Do(func() { tidbInst, tidbErr = startTiDB(context.Background()) })
+	if tidbErr != nil {
+		t.Fatalf("start tidb: %v\nis Docker running?", tidbErr)
+	}
+	return tidbInst
+}
 
+// Schema creates a database unique to the calling test and returns a handle
+// scoped to it.
+//
+// The DROP on cleanup is hygiene, not isolation: the unique name is what keeps
+// tests apart, so a missed drop leaves rubbish behind but cannot affect
+// another test.
+func (d *TiDB) Schema(t *testing.T) *sql.DB {
+	t.Helper()
+	name := fmt.Sprintf("s_%s_%d", safeName(t.Name()), time.Now().UnixNano())
+	if _, err := d.DB.Exec("CREATE DATABASE " + name); err != nil {
+		t.Fatalf("create database %s: %v", name, err)
+	}
+	t.Cleanup(func() { d.DB.Exec("DROP DATABASE IF EXISTS " + name) })
+
+	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(%s)/%s?parseTime=true&loc=UTC", d.addr, name))
+	if err != nil {
+		t.Fatalf("open %s: %v", name, err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Ping(); err != nil {
+		t.Fatalf("ping %s: %v", name, err)
+	}
+	return db
+}
+
+func startTiDB(ctx context.Context) (*TiDB, error) {
 	req := testcontainers.ContainerRequest{
 		Image:        tidbImage,
 		ExposedPorts: []string{tidbPort, tidbStatusPort},
@@ -55,28 +95,25 @@ func StartTiDB(t *testing.T) *TiDB {
 		Started:          true,
 	})
 	if err != nil {
-		t.Fatalf("start tidb: %v\nis Docker running?", err)
+		return nil, fmt.Errorf("start container: %w", err)
 	}
-	t.Cleanup(func() { container.Terminate(context.Background()) })
-
 	host, err := container.Host(ctx)
 	if err != nil {
-		t.Fatalf("tidb host: %v", err)
+		return nil, fmt.Errorf("host: %w", err)
 	}
 	port, err := container.MappedPort(ctx, "4000")
 	if err != nil {
-		t.Fatalf("tidb mapped port: %v", err)
+		return nil, fmt.Errorf("mapped port: %w", err)
 	}
-	dsn := fmt.Sprintf(tidbDSNFmt, host, port.Port())
+	addr := fmt.Sprintf("%s:%s", host, port.Port())
+	dsn := fmt.Sprintf("root@tcp(%s)/test?parseTime=true&loc=UTC", addr)
 
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		t.Fatalf("open tidb: %v", err)
+		return nil, fmt.Errorf("open: %w", err)
 	}
-	t.Cleanup(func() { db.Close() })
 	if err := db.Ping(); err != nil {
-		t.Fatalf("ping tidb at %s: %v", dsn, err)
+		return nil, fmt.Errorf("ping %s: %w", dsn, err)
 	}
-
-	return &TiDB{DSN: dsn, DB: db}
+	return &TiDB{DSN: dsn, DB: db, addr: addr}, nil
 }

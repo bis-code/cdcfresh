@@ -12,14 +12,13 @@ import (
 	"github.com/bis-code/cdcfresh/internal/testenv"
 )
 
-const topic = "persistent://public/default/cdcfresh-testenv"
-
 // TestPulsarCarriesCanalJSON proves the rig the adapter tier is built on: real
 // canal-json published to a real broker comes back to a consumer byte-for-byte
 // and can be acknowledged. Ack is the point — it is the mechanism cdcfresh's
 // delivery guarantee rests on, and the one thing a fake cannot vouch for.
 func TestPulsarCarriesCanalJSON(t *testing.T) {
-	p := testenv.StartPulsar(t)
+	p := testenv.SharedPulsar(t)
+	topic := p.Topic(t)
 
 	want := []string{"insert", "update", "delete"}
 	payloads := make([][]byte, 0, len(want))
@@ -64,7 +63,7 @@ func TestPulsarCarriesCanalJSON(t *testing.T) {
 // recomputed from source tables with ordinary SQL, which is all cdcfresh ever
 // asks of the database.
 func TestTiDBServesAsRebuildTarget(t *testing.T) {
-	db := testenv.StartTiDB(t).DB
+	db := testenv.SharedTiDB(t).Schema(t)
 
 	for _, stmt := range []string{
 		"CREATE TABLE readings (id INT PRIMARY KEY, device VARCHAR(64), value INT)",

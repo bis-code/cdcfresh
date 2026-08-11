@@ -5,7 +5,6 @@ package pulsar_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 	"time"
 
@@ -14,19 +13,14 @@ import (
 	"github.com/bis-code/cdcfresh/pulsar"
 )
 
-func topicName(t *testing.T) string {
-	t.Helper()
-	return fmt.Sprintf("persistent://public/default/%s-%d", t.Name(), time.Now().UnixNano())
-}
-
 // TestSourceDeliversRowEventsAndAcks runs the adapter against a real broker
 // carrying the exact bytes a TiCDC changefeed produces: row events, DDL, and
 // something undecodable. It also proves the acks stick, by reconnecting on
 // the same subscription and requiring silence — an ack that never reached the
 // broker looks identical to a working one until a restart replays everything.
 func TestSourceDeliversRowEventsAndAcks(t *testing.T) {
-	p := testenv.StartPulsar(t)
-	topic := topicName(t)
+	p := testenv.SharedPulsar(t)
+	topic := p.Topic(t)
 	const subscription = "adapter-acks"
 
 	p.Produce(t, topic,
@@ -102,9 +96,9 @@ func TestSourceDeliversRowEventsAndAcks(t *testing.T) {
 // the event body reaches the SQL — the doorbell only says which device to
 // recompute.
 func TestRefresherRebuildsDerivedTable(t *testing.T) {
-	p := testenv.StartPulsar(t)
-	db := testenv.StartTiDB(t).DB
-	topic := topicName(t)
+	p := testenv.SharedPulsar(t)
+	db := testenv.SharedTiDB(t).Schema(t)
+	topic := p.Topic(t)
 
 	for _, stmt := range []string{
 		"CREATE TABLE readings (id INT PRIMARY KEY, device VARCHAR(64), value INT)",

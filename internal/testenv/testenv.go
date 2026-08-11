@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -37,4 +38,19 @@ func Golden(t *testing.T, name string) []byte {
 		t.Fatalf("read golden %s: %v", name, err)
 	}
 	return b
+}
+
+// safeName turns a test name into something usable as a Pulsar topic segment
+// and a SQL identifier. Subtests contain "/", which is legal in neither.
+func safeName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }

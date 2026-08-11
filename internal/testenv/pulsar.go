@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,11 +35,35 @@ type Pulsar struct {
 	Client pulsar.Client
 }
 
-// StartPulsar brings up a broker for the duration of the test.
-func StartPulsar(t *testing.T) *Pulsar {
-	t.Helper()
-	ctx := context.Background()
+var (
+	pulsarOnce sync.Once
+	pulsarInst *Pulsar
+	pulsarErr  error
+)
 
+// SharedPulsar returns a broker started once for this test binary and reused
+// by every test that asks. Tests keep apart by taking a unique Topic, not by
+// taking private brokers.
+//
+// It registers no t.Cleanup deliberately: a cleanup on the first caller's T
+// would terminate the container for every test after it. Testcontainers' Ryuk
+// reaper removes the container when the test process exits.
+func SharedPulsar(t *testing.T) *Pulsar {
+	t.Helper()
+	pulsarOnce.Do(func() { pulsarInst, pulsarErr = startPulsar(context.Background()) })
+	if pulsarErr != nil {
+		t.Fatalf("start pulsar: %v\nis Docker running?", pulsarErr)
+	}
+	return pulsarInst
+}
+
+// Topic returns a topic name unique to the calling test.
+func (p *Pulsar) Topic(t *testing.T) string {
+	t.Helper()
+	return fmt.Sprintf("persistent://public/default/%s-%d", safeName(t.Name()), time.Now().UnixNano())
+}
+
+func startPulsar(ctx context.Context) (*Pulsar, error) {
 	req := testcontainers.ContainerRequest{
 		Image:        pulsarImage,
 		ExposedPorts: []string{pulsarServicePort, pulsarAdminPort},
@@ -76,17 +101,16 @@ func StartPulsar(t *testing.T) *Pulsar {
 		Started:          true,
 	})
 	if err != nil {
-		t.Fatalf("start pulsar: %v\nis Docker running?", err)
+		return nil, fmt.Errorf("start container: %w", err)
 	}
-	t.Cleanup(func() { container.Terminate(context.Background()) })
 
 	host, err := container.Host(ctx)
 	if err != nil {
-		t.Fatalf("pulsar host: %v", err)
+		return nil, fmt.Errorf("host: %w", err)
 	}
 	port, err := container.MappedPort(ctx, "6650")
 	if err != nil {
-		t.Fatalf("pulsar mapped port: %v", err)
+		return nil, fmt.Errorf("mapped port: %w", err)
 	}
 	url := fmt.Sprintf("pulsar://%s:%s", host, port.Port())
 
@@ -97,11 +121,9 @@ func StartPulsar(t *testing.T) *Pulsar {
 		Logger:            plog.DefaultNopLogger(),
 	})
 	if err != nil {
-		t.Fatalf("pulsar client at %s: %v", url, err)
+		return nil, fmt.Errorf("client at %s: %w", url, err)
 	}
-	t.Cleanup(client.Close)
-
-	return &Pulsar{URL: url, Client: client}
+	return &Pulsar{URL: url, Client: client}, nil
 }
 
 // Produce publishes payloads to topic in order, blocking until each is
