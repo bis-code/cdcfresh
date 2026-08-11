@@ -51,6 +51,39 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	}
 }
 
+// recvOr receives from c, failing this test after 60s rather than blocking
+// until the package-wide test timeout fires. A bare receive on a channel a
+// regression never closes costs every sibling test its result and reports the
+// failure as a goroutine dump; a named failure costs only this one.
+func recvOr[T any](t *testing.T, c <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-c:
+		return v
+	case <-time.After(60 * time.Second):
+		t.Fatalf("timed out after 60s waiting for %s", what)
+		var zero T
+		return zero
+	}
+}
+
+// stopRun cancels a Refresher and waits for Run to return. Every test defers
+// it so no library goroutine outlives its test: a worker still unwinding after
+// the test function has returned can call OnError, and a t.Logf on a completed
+// *testing.T panics the whole package binary.
+func stopRun(t *testing.T, cancel context.CancelFunc, done <-chan error) {
+	t.Helper()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("Run: %v", err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Errorf("Run did not return within 60s of cancellation")
+	}
+}
+
 // recorder collects the keys a rebuild was asked for.
 type recorder struct {
 	mu   sync.Mutex
@@ -116,6 +149,7 @@ func TestRestartResumesWithoutLosingKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Source: %v", err)
 	}
+	defer src1.Close() // Close is idempotent; the explicit close below still leads
 
 	blocked := make(chan struct{})
 	var once sync.Once
@@ -138,14 +172,15 @@ func TestRestartResumesWithoutLosingKeys(t *testing.T) {
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	done1 := make(chan error, 1)
 	go func() { done1 <- r1.Run(ctx1) }()
+	stop1 := sync.OnceFunc(func() { stopRun(t, cancel1, done1) })
+	defer stop1()
 
 	waitFor(t, "all three events to be received and acked", func() bool {
 		return r1.Stats().EventsReceived == 3
 	})
-	<-blocked // a rebuild is in flight and will never finish
+	recvOr(t, blocked, "a rebuild to start") // it is in flight and will never finish
 
-	cancel1() // the crash
-	<-done1
+	stop1() // the crash
 	src1.Close()
 
 	// --- second run: nothing left on the broker, so reconcile must heal ---
@@ -172,9 +207,9 @@ func TestRestartResumesWithoutLosingKeys(t *testing.T) {
 	}
 
 	ctx2, cancel2 := context.WithCancel(context.Background())
-	defer cancel2()
 	done2 := make(chan error, 1)
 	go func() { done2 <- r2.Run(ctx2) }()
+	defer stopRun(t, cancel2, done2)
 
 	waitFor(t, "every scope to be rebuilt after the restart", func() bool {
 		for _, d := range devices {
@@ -190,11 +225,6 @@ func TestRestartResumesWithoutLosingKeys(t *testing.T) {
 	// is not doing what D6 says it does.
 	if got := r2.Stats().EventsReceived; got != 0 {
 		t.Errorf("second run received %d events, want 0 — acked work was redelivered", got)
-	}
-
-	cancel2()
-	if err := <-done2; err != nil && !errors.Is(err, context.Canceled) {
-		t.Errorf("Run: %v", err)
 	}
 }
 
@@ -237,24 +267,26 @@ func TestBacklogIsDrainedOnFirstSubscribe(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- r.Run(ctx) }()
+	defer stopRun(t, cancel, done)
 
 	waitFor(t, "every backlogged scope to be rebuilt", func() bool {
 		return rec.count() == len(devices)
 	})
-
-	cancel()
-	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
-		t.Errorf("Run: %v", err)
-	}
 }
 
 // TestPoisonedKeyIsHealedByReconcile runs the quarantine lifecycle against a
 // real broker; it is covered elsewhere only with fakes. It is also the
 // evidence for closing the Mark(Key) question: a sweep already re-admits a
 // key that no event will ever dirty again, which a bare Mark would not.
+//
+// PoisonedKeys == 0 on its own would prove nothing: markReconcile clears the
+// poisoned flag at the start of every sweep, before the retry rebuild runs, so
+// the gauge legitimately reads 0 for a few tens of milliseconds of each
+// one-second cycle even while the rebuild fails permanently. Healing is only
+// established by pairing it with a rebuild that actually succeeded, which is
+// why the final wait asserts both in one condition rather than in sequence.
 func TestPoisonedKeyIsHealedByReconcile(t *testing.T) {
 	p := testenv.SharedPulsar(t)
 	topic := p.Topic(t)
@@ -270,9 +302,7 @@ func TestPoisonedKeyIsHealedByReconcile(t *testing.T) {
 
 	var mu sync.Mutex
 	failing := true
-	var succeeded bool
 	setFailing := func(v bool) { mu.Lock(); failing = v; mu.Unlock() }
-	didSucceed := func() bool { mu.Lock(); defer mu.Unlock(); return succeeded }
 
 	r, err := cdcfresh.New(
 		cdcfresh.Source(src),
@@ -283,7 +313,6 @@ func TestPoisonedKeyIsHealedByReconcile(t *testing.T) {
 			if failing {
 				return errors.New("rebuild refused on purpose")
 			}
-			succeeded = true
 			return nil
 		}),
 		cdcfresh.Coalesce(20*time.Millisecond),
@@ -301,9 +330,9 @@ func TestPoisonedKeyIsHealedByReconcile(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- r.Run(ctx) }()
+	defer stopRun(t, cancel, done)
 
 	waitFor(t, "the key to be quarantined after repeated failures", func() bool {
 		return r.Stats().PoisonedKeys == 1
@@ -312,33 +341,34 @@ func TestPoisonedKeyIsHealedByReconcile(t *testing.T) {
 	// Only a sweep can revive it now; no further events will arrive.
 	setFailing(false)
 
-	waitFor(t, "a reconcile sweep to re-admit the poisoned key", didSucceed)
-
-	waitFor(t, "the quarantine to clear", func() bool {
-		return r.Stats().PoisonedKeys == 0
+	// One condition, deliberately: the cleared gauge means "healed" only in the
+	// company of a rebuild that succeeded. See the doc comment above.
+	waitFor(t, "a reconcile sweep to re-admit the key and clear the quarantine", func() bool {
+		s := r.Stats()
+		return s.RebuildsOK >= 1 && s.PoisonedKeys == 0
 	})
-
-	cancel()
-	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
-		t.Errorf("Run: %v", err)
-	}
 }
 
 // TestBurstOfChangesCollapsesToOneRebuildPerScope measures the library's
 // whole value: many changes to few scopes must become few rebuilds. 500
-// changes across five scopes, produced back-to-back with no gaps, collapse
-// to one rebuild per scope — the debounce chain for each scope keeps
-// resetting until production ends, so the whole burst lands inside a single
-// coalesce window per key.
+// changes across five scopes collapse to about one rebuild per scope.
 //
-// What this does NOT exercise: multi-window behaviour. Production is
-// round-robin across devices with no delay, so same-device messages arrive
-// far under the Coalesce window for the entire run; MaxWait never fires.
-// Proving that a debounce chain eventually flushes mid-burst — the case
-// MaxWait exists for — needs spaced-out production and is a different test.
-// The bound here is deliberately loose — the exact ratio moves with timing,
-// and pinning it would manufacture a flake. What matters is catching a
-// collapse to one-rebuild-per-event.
+// What drives the collapse is *consumption* pacing, not production pacing:
+// the whole burst is produced and persisted before a consumer exists, and
+// coalescing runs off the timestamp receiveLoop takes when it marks a key. So
+// the debounce chain for a scope stays alive only because the consumer drains
+// same-device messages faster than the 500ms Coalesce window — a property of
+// broker throughput, which nothing here bounds.
+//
+// That is why the bound is a small multiple of the scope count rather than
+// exactly one per scope: on a slow drain, MaxWait fires on its own schedule
+// (firstDirty+5s, independent of the debounce chain) and each scope flushes
+// once per elapsed MaxWait. A couple of those are expected and fine; anything
+// beyond len(devices)*4 means coalescing is no longer collapsing the burst.
+//
+// What this does NOT exercise: multi-window behaviour deliberately. Proving
+// that a debounce chain eventually flushes mid-burst — the case MaxWait exists
+// for — needs spaced-out production and is a different test.
 func TestBurstOfChangesCollapsesToOneRebuildPerScope(t *testing.T) {
 	p := testenv.SharedPulsar(t)
 	topic := p.Topic(t)
@@ -376,9 +406,9 @@ func TestBurstOfChangesCollapsesToOneRebuildPerScope(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- r.Run(ctx) }()
+	defer stopRun(t, cancel, done)
 
 	waitFor(t, "all events to be consumed", func() bool {
 		return r.Stats().EventsReceived == totalEvents
@@ -391,16 +421,11 @@ func TestBurstOfChangesCollapsesToOneRebuildPerScope(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	rebuilds := rec.total()
-	if rebuilds >= totalEvents/5 {
-		t.Errorf("%d rebuilds for %d events across %d scopes — coalescing is not collapsing the burst",
-			rebuilds, totalEvents, len(devices))
+	if limit := len(devices) * 4; rebuilds > limit {
+		t.Errorf("%d rebuilds for %d events across %d scopes (limit %d) — coalescing is not collapsing the burst",
+			rebuilds, totalEvents, len(devices), limit)
 	}
 	t.Logf("coalesced %d events across %d scopes into %d rebuilds", totalEvents, len(devices), rebuilds)
-
-	cancel()
-	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
-		t.Errorf("Run: %v", err)
-	}
 }
 
 // TestShutdownMidRebuildReturnsCleanly cancels while a rebuild is in flight.
@@ -452,19 +477,26 @@ func TestShutdownMidRebuildReturnsCleanly(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- r.Run(ctx) }()
-
-	<-entered
-	cancel()
-
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("Run returned %v, want context.Canceled", err)
+	// Deferred as well as called inline: on any failure path above the inline
+	// call, Run must still be drained before the test completes.
+	stop := sync.OnceFunc(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("Run returned %v, want context.Canceled", err)
+			}
+		case <-time.After(30 * time.Second):
+			t.Errorf("Run did not return within 30s of cancellation")
 		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("Run did not return within 30s of cancellation")
-	}
+	})
+	defer stop()
 
+	recvOr(t, entered, "the rebuild to start")
+	stop()
+
+	// Safe to read only because stop() returned: onError is reached solely from
+	// goroutines inside Run's WaitGroup.
 	mu.Lock()
 	defer mu.Unlock()
 	for _, e := range errsSeen {

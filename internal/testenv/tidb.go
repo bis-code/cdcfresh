@@ -60,7 +60,16 @@ func SharedTiDB(t *testing.T) *TiDB {
 // another test.
 func (d *TiDB) Schema(t *testing.T) *sql.DB {
 	t.Helper()
-	name := fmt.Sprintf("s_%s_%d", safeName(t.Name()), time.Now().UnixNano())
+	// MySQL/TiDB cap database identifiers at 64 characters, and the 19-digit
+	// nanosecond suffix plus separators costs 22 of them. The test name is only
+	// there for human legibility — uniqueness comes from the timestamp — so
+	// truncating it is safe and keeps a descriptively named test from failing
+	// at CREATE DATABASE with an error that names neither the test nor the cause.
+	n := safeName(t.Name())
+	if len(n) > 40 {
+		n = n[:40]
+	}
+	name := fmt.Sprintf("s_%s_%d", n, time.Now().UnixNano())
 	if _, err := d.DB.Exec("CREATE DATABASE " + name); err != nil {
 		t.Fatalf("create database %s: %v", name, err)
 	}
