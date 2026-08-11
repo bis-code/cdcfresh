@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := test
 
-.PHONY: test test-unit test-race test-integration infra-up infra-down lint help
+.PHONY: test test-unit test-race test-integration infra-up infra-down fmt lint help
 
 COMPOSE := docker compose -f test/cdcstack/docker-compose.yml
 
@@ -35,6 +35,9 @@ infra-up: ## start the full TiDB + TiCDC + Pulsar stack locally (not needed for 
 
 infra-down: ## stop the local stack and delete its state
 	$(COMPOSE) down -v
+
+fmt: ## format the tree (lint only reports; this fixes)
+	gofmt -w .
 
 lint: ## gofmt check (fails if it reports files) + go vet, including tagged code
 	@fmt_out=$$(gofmt -l .); \
