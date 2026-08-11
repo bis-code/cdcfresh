@@ -196,3 +196,124 @@ func TestRestartResumesWithoutLosingKeys(t *testing.T) {
 		t.Errorf("Run: %v", err)
 	}
 }
+
+// TestBacklogIsDrainedOnFirstSubscribe guards the adapter's
+// SubscriptionPositionEarliest choice, whose stated reason is that a
+// changefeed may have produced before this instance existed. Starting at the
+// latest position instead would leave those scopes stale until a sweep.
+func TestBacklogIsDrainedOnFirstSubscribe(t *testing.T) {
+	p := testenv.SharedPulsar(t)
+	topic := p.Topic(t)
+	devices := []cdcfresh.Key{"dev-a", "dev-b", "dev-c", "dev-d", "dev-e"}
+
+	// Everything is produced before any consumer exists.
+	payloads := make([][]byte, 0, len(devices))
+	for _, d := range devices {
+		payloads = append(payloads, canalInsert(string(d)))
+	}
+	p.Produce(t, topic, payloads...)
+
+	src, err := pulsar.Source(p.URL, []string{topic}, pulsar.WithSubscription("backlog"))
+	if err != nil {
+		t.Fatalf("Source: %v", err)
+	}
+	defer src.Close()
+
+	rec := newRecorder()
+	// No Reconcile: the backlog is the only thing that can produce a rebuild.
+	r, err := cdcfresh.New(
+		cdcfresh.Source(src),
+		cdcfresh.Scope(deviceScope),
+		cdcfresh.Rebuild(func(_ context.Context, k cdcfresh.Key) error {
+			rec.add(k)
+			return nil
+		}),
+		cdcfresh.Coalesce(50*time.Millisecond),
+		cdcfresh.MaxWait(500*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	waitFor(t, "every backlogged scope to be rebuilt", func() bool {
+		return rec.count() == len(devices)
+	})
+
+	cancel()
+	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+		t.Errorf("Run: %v", err)
+	}
+}
+
+// TestSustainedLoadCoalesces measures the library's whole value: many changes
+// to few scopes must become few rebuilds. The bound is deliberately loose —
+// the exact ratio moves with timing, and pinning it would manufacture a flake.
+// What matters is catching a collapse to one-rebuild-per-event.
+func TestSustainedLoadCoalesces(t *testing.T) {
+	p := testenv.SharedPulsar(t)
+	topic := p.Topic(t)
+	devices := []string{"dev-a", "dev-b", "dev-c", "dev-d", "dev-e"}
+	const eventsPerDevice = 100
+	const totalEvents = eventsPerDevice * 5
+
+	payloads := make([][]byte, 0, totalEvents)
+	for i := 0; i < eventsPerDevice; i++ {
+		for _, d := range devices {
+			payloads = append(payloads, canalInsert(d))
+		}
+	}
+	p.Produce(t, topic, payloads...)
+
+	src, err := pulsar.Source(p.URL, []string{topic}, pulsar.WithSubscription("load"))
+	if err != nil {
+		t.Fatalf("Source: %v", err)
+	}
+	defer src.Close()
+
+	rec := newRecorder()
+	r, err := cdcfresh.New(
+		cdcfresh.Source(src),
+		cdcfresh.Scope(deviceScope),
+		cdcfresh.Rebuild(func(_ context.Context, k cdcfresh.Key) error {
+			rec.add(k)
+			return nil
+		}),
+		cdcfresh.Coalesce(500*time.Millisecond),
+		cdcfresh.MaxWait(5*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	waitFor(t, "all events to be consumed", func() bool {
+		return r.Stats().EventsReceived == totalEvents
+	})
+	waitFor(t, "every scope to be rebuilt at least once", func() bool {
+		return rec.count() == len(devices)
+	})
+
+	// Let the last coalesce window close so late rebuilds are counted.
+	time.Sleep(2 * time.Second)
+
+	rebuilds := rec.total()
+	if rebuilds >= totalEvents/5 {
+		t.Errorf("%d rebuilds for %d events across %d scopes — coalescing is not collapsing the burst",
+			rebuilds, totalEvents, len(devices))
+	}
+	t.Logf("coalesced %d events across %d scopes into %d rebuilds", totalEvents, len(devices), rebuilds)
+
+	cancel()
+	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+		t.Errorf("Run: %v", err)
+	}
+}
