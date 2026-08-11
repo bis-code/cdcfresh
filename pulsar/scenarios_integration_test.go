@@ -250,6 +250,79 @@ func TestBacklogIsDrainedOnFirstSubscribe(t *testing.T) {
 	}
 }
 
+// TestPoisonedKeyIsHealedByReconcile runs the quarantine lifecycle against a
+// real broker; it is covered elsewhere only with fakes. It is also the
+// evidence for closing the Mark(Key) question: a sweep already re-admits a
+// key that no event will ever dirty again, which a bare Mark would not.
+func TestPoisonedKeyIsHealedByReconcile(t *testing.T) {
+	p := testenv.SharedPulsar(t)
+	topic := p.Topic(t)
+	const device = cdcfresh.Key("dev-a")
+
+	p.Produce(t, topic, canalInsert(string(device)))
+
+	src, err := pulsar.Source(p.URL, []string{topic}, pulsar.WithSubscription("poison"))
+	if err != nil {
+		t.Fatalf("Source: %v", err)
+	}
+	defer src.Close()
+
+	var mu sync.Mutex
+	failing := true
+	var succeeded bool
+	setFailing := func(v bool) { mu.Lock(); failing = v; mu.Unlock() }
+	didSucceed := func() bool { mu.Lock(); defer mu.Unlock(); return succeeded }
+
+	r, err := cdcfresh.New(
+		cdcfresh.Source(src),
+		cdcfresh.Scope(deviceScope),
+		cdcfresh.Rebuild(func(_ context.Context, k cdcfresh.Key) error {
+			mu.Lock()
+			defer mu.Unlock()
+			if failing {
+				return errors.New("rebuild refused on purpose")
+			}
+			succeeded = true
+			return nil
+		}),
+		cdcfresh.Coalesce(20*time.Millisecond),
+		cdcfresh.MaxWait(200*time.Millisecond),
+		cdcfresh.PoisonAfter(2),
+		cdcfresh.Backoff(10*time.Millisecond, 50*time.Millisecond),
+		// A sweep every second is the only route back for a poisoned key.
+		cdcfresh.Reconcile(time.Second, func(context.Context) ([]cdcfresh.Key, error) {
+			return []cdcfresh.Key{device}, nil
+		}),
+		cdcfresh.OnError(func(err error) { t.Logf("cdcfresh: %v", err) }),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	waitFor(t, "the key to be quarantined after repeated failures", func() bool {
+		return r.Stats().PoisonedKeys == 1
+	})
+
+	// Only a sweep can revive it now; no further events will arrive.
+	setFailing(false)
+
+	waitFor(t, "a reconcile sweep to re-admit the poisoned key", didSucceed)
+
+	waitFor(t, "the quarantine to clear", func() bool {
+		return r.Stats().PoisonedKeys == 0
+	})
+
+	cancel()
+	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+		t.Errorf("Run: %v", err)
+	}
+}
+
 // TestBurstOfChangesCollapsesToOneRebuildPerScope measures the library's
 // whole value: many changes to few scopes must become few rebuilds. 500
 // changes across five scopes, produced back-to-back with no gaps, collapse
