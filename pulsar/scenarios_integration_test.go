@@ -71,6 +71,17 @@ func recvOr[T any](t *testing.T, c <-chan T, what string) T {
 // it so no library goroutine outlives its test: a worker still unwinding after
 // the test function has returned can call OnError, and a t.Logf on a completed
 // *testing.T panics the whole package binary.
+//
+// It reports with t.Errorf, never t.Fatalf, and that is load-bearing rather
+// than stylistic. It runs from a defer, and twice from inside a sync.OnceFunc
+// — whose recover-and-repanic wrapper turns the runtime.Goexit that t.Fatalf
+// performs into panic(nil), i.e. a *runtime.PanicNilError that takes down the
+// binary. A Fatal here would re-enter the very failure this function prevents.
+//
+// Run returns in about a second in practice; the bound is generous, not tuned.
+// It is kept well under recvOr's so that five simultaneously failing tests
+// still finish inside the 10-minute package timeout, rather than trading named
+// failures for the goroutine dump that timeout produces.
 func stopRun(t *testing.T, cancel context.CancelFunc, done <-chan error) {
 	t.Helper()
 	cancel()
@@ -79,8 +90,8 @@ func stopRun(t *testing.T, cancel context.CancelFunc, done <-chan error) {
 		if err != nil && !errors.Is(err, context.Canceled) {
 			t.Errorf("Run: %v", err)
 		}
-	case <-time.After(60 * time.Second):
-		t.Errorf("Run did not return within 60s of cancellation")
+	case <-time.After(15 * time.Second):
+		t.Errorf("Run did not return within 15s of cancellation")
 	}
 }
 
@@ -304,6 +315,13 @@ func TestPoisonedKeyIsHealedByReconcile(t *testing.T) {
 	failing := true
 	setFailing := func(v bool) { mu.Lock(); failing = v; mu.Unlock() }
 
+	// The refusals are worth seeing when this test fails, but OnError runs on a
+	// library goroutine, and t.Logf from one that outlives the test panics the
+	// whole package binary. stopRun makes that unreachable on every path except
+	// a Run that never returns at all — so buffer here and log after the drain,
+	// leaving no route from a library goroutine to *testing.T.
+	var errsSeen []string
+
 	r, err := cdcfresh.New(
 		cdcfresh.Source(src),
 		cdcfresh.Scope(deviceScope),
@@ -323,7 +341,11 @@ func TestPoisonedKeyIsHealedByReconcile(t *testing.T) {
 		cdcfresh.Reconcile(time.Second, func(context.Context) ([]cdcfresh.Key, error) {
 			return []cdcfresh.Key{device}, nil
 		}),
-		cdcfresh.OnError(func(err error) { t.Logf("cdcfresh: %v", err) }),
+		cdcfresh.OnError(func(err error) {
+			mu.Lock()
+			defer mu.Unlock()
+			errsSeen = append(errsSeen, err.Error())
+		}),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -332,6 +354,15 @@ func TestPoisonedKeyIsHealedByReconcile(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- r.Run(ctx) }()
+	// Registered before stopRun so LIFO drains Run first: by the time this
+	// reads errsSeen, every goroutine that could append to it has exited.
+	defer func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, e := range errsSeen {
+			t.Logf("%s", e) // the library's messages already carry a "cdcfresh:" prefix
+		}
+	}()
 	defer stopRun(t, cancel, done)
 
 	waitFor(t, "the key to be quarantined after repeated failures", func() bool {
@@ -363,8 +394,10 @@ func TestPoisonedKeyIsHealedByReconcile(t *testing.T) {
 // That is why the bound is a small multiple of the scope count rather than
 // exactly one per scope: on a slow drain, MaxWait fires on its own schedule
 // (firstDirty+5s, independent of the debounce chain) and each scope flushes
-// once per elapsed MaxWait. A couple of those are expected and fine; anything
-// beyond len(devices)*4 means coalescing is no longer collapsing the burst.
+// once per elapsed MaxWait. A couple of those are expected and fine. Anything
+// beyond len(devices)*4 means either that coalescing is no longer collapsing
+// the burst, or that the drain ran past four MaxWait windows on a very slow
+// machine — the logged count says which. Observed here: 5, the floor.
 //
 // What this does NOT exercise: multi-window behaviour deliberately. Proving
 // that a debounce chain eventually flushes mid-burst — the case MaxWait exists
